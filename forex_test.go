@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -139,48 +140,185 @@ func TestIncreaseExistingOrder(t *testing.T) {
 	}
 }
 
-func TestSettleTrades(t *testing.T) {
+func TestContFlow(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	alice, bob, carol := newUser(t, s, "alice"), newUser(t, s, "bob"), newUser(t, s, "carol")
 	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
 	s.Fill(ctx, 1, bob, 30)
 	s.Fill(ctx, 1, bob, 20)
+	s.db.Exec(`UPDATE notifications SET sent_at = 1`) // ignore the fill DMs
 
-	trades, _ := s.Trades(ctx, alice.ID, false, 10)
-	if len(trades) != 2 {
-		t.Fatalf("expected 2 trades, got %d", len(trades))
+	state := func(u *User) ContState {
+		t.Helper()
+		trades, err := s.Trades(ctx, u.ID, true, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tr := range trades {
+			if tr.FillID == 1 {
+				return tr.Cont
+			}
+		}
+		t.Fatalf("fill 1 not in %s's trades", u.Username)
+		return ""
 	}
-	first := trades[0].FillID
-	if err := s.SetSettled(ctx, first, carol.ID, true); !isUserError(err) {
-		t.Fatalf("stranger settling a trade: %v", err)
+	act := func(u *User, a ContAction) error {
+		t.Helper()
+		_, err := s.ContAct(ctx, 1, u, a)
+		return err
 	}
-	if err := s.SetSettled(ctx, first, alice.ID, true); err != nil {
+	lastDM := func() Notification {
+		t.Helper()
+		pending, _ := s.PendingNotifications(ctx, 10)
+		if len(pending) != 1 {
+			t.Fatalf("expected exactly one queued DM, got %+v", pending)
+		}
+		s.MarkSent(ctx, pending[0].ID)
+		return pending[0]
+	}
+
+	if st := state(alice); st != ContUndecided {
+		t.Fatalf("new trade: %s", st)
+	}
+	if err := act(carol, ActRequest); err != errTradeNotFound {
+		t.Fatalf("stranger: %v", err)
+	}
+	if err := act(alice, ActFulfill); !isUserError(err) {
+		t.Fatalf("fulfill before CONT sent: %v", err)
+	}
+
+	// Alice asks Bob, Bob asks back, Alice accepts.
+	if err := act(alice, ActRequest); err != nil {
 		t.Fatal(err)
 	}
+	if dm := lastDM(); dm.UserID != bob.ID || !strings.Contains(dm.Message, "asks you to send the CONT") || !strings.Contains(dm.Message, "you send **30 NCC**") {
+		t.Fatalf("request DM: %+v", dm)
+	}
+	if state(alice) != ContAskedThem || state(bob) != ContAskedMe {
+		t.Fatalf("after request: alice=%s bob=%s", state(alice), state(bob))
+	}
+	if err := act(alice, ActRequest); err != errTradeChanged {
+		t.Fatalf("asking twice: %v", err)
+	}
+	if err := act(bob, ActRequest); err != nil {
+		t.Fatal(err)
+	}
+	if dm := lastDM(); dm.UserID != alice.ID || !strings.Contains(dm.Message, "instead") {
+		t.Fatalf("counter-request DM: %+v", dm)
+	}
+	if state(alice) != ContAskedMe || state(bob) != ContAskedThem {
+		t.Fatalf("after counter: alice=%s bob=%s", state(alice), state(bob))
+	}
+	if err := act(alice, ActSendMyself); err != nil {
+		t.Fatal(err)
+	}
+	if dm := lastDM(); dm.UserID != bob.ID || !strings.Contains(dm.Message, "accepted") {
+		t.Fatalf("accept DM: %+v", dm)
+	}
+	if state(alice) != ContMine || state(bob) != ContTheirs {
+		t.Fatalf("after accept: alice=%s bob=%s", state(alice), state(bob))
+	}
 
-	// Hidden for alice, still visible for bob.
-	if trades, _ := s.Trades(ctx, alice.ID, false, 10); len(trades) != 1 || trades[0].FillID == first {
-		t.Fatalf("settled trade should be hidden for alice: %+v", trades)
+	// Only Alice can mark it sent, once.
+	if err := act(bob, ActMarkSent); err != errTradeChanged {
+		t.Fatalf("non-sender marking sent: %v", err)
+	}
+	if err := act(bob, ActSendMyself); err != errTradeChanged {
+		t.Fatalf("volunteering after it's decided: %v", err)
+	}
+	if err := act(alice, ActMarkSent); err != nil {
+		t.Fatal(err)
+	}
+	if dm := lastDM(); dm.UserID != bob.ID || !strings.Contains(dm.Message, "sent the CONT") {
+		t.Fatalf("sent DM: %+v", dm)
+	}
+	if state(alice) != ContSentByMe || state(bob) != ContSentByThem {
+		t.Fatalf("after sent: alice=%s bob=%s", state(alice), state(bob))
+	}
+
+	// Fulfilling hides it for that side only.
+	if err := act(bob, ActFulfill); err != nil {
+		t.Fatal(err)
+	}
+	if trades, _ := s.Trades(ctx, bob.ID, false, 10); len(trades) != 1 || trades[0].FillID == 1 {
+		t.Fatalf("fulfilled trade should be hidden for bob: %+v", trades)
+	}
+	aliceTrades, _ := s.Trades(ctx, alice.ID, false, 10)
+	if len(aliceTrades) != 2 || !aliceTrades[1].TheyFulfilled || aliceTrades[1].Fulfilled {
+		t.Fatalf("alice should still see it, fulfilled by bob: %+v", aliceTrades)
+	}
+	all, _ := s.Trades(ctx, bob.ID, true, 10)
+	if len(all) != 2 || all[1].FillID != 1 || !all[1].Fulfilled {
+		t.Fatalf("show-fulfilled should list it last: %+v", all)
+	}
+	if n, _ := s.FulfilledCount(ctx, bob.ID); n != 1 {
+		t.Fatalf("fulfilled count for bob = %d", n)
+	}
+	if n, _ := s.FulfilledCount(ctx, alice.ID); n != 0 {
+		t.Fatalf("fulfilled count for alice = %d", n)
+	}
+	if err := act(bob, ActUnfulfill); err != nil {
+		t.Fatal(err)
 	}
 	if trades, _ := s.Trades(ctx, bob.ID, false, 10); len(trades) != 2 {
-		t.Fatalf("bob's view shouldn't change: %+v", trades)
+		t.Fatalf("unfulfilling should bring it back: %+v", trades)
 	}
-	all, _ := s.Trades(ctx, alice.ID, true, 10)
-	if len(all) != 2 || all[1].FillID != first || !all[1].Settled || all[0].Settled {
-		t.Fatalf("show-settled should list it last, marked settled: %+v", all)
+	if pending, _ := s.PendingNotifications(ctx, 10); len(pending) != 0 {
+		t.Fatalf("fulfilling shouldn't DM: %+v", pending)
 	}
-	if n, _ := s.SettledCount(ctx, alice.ID); n != 1 {
-		t.Fatalf("settled count for alice = %d", n)
-	}
-	if n, _ := s.SettledCount(ctx, bob.ID); n != 0 {
-		t.Fatalf("settled count for bob = %d", n)
-	}
+}
 
-	s.SetSettled(ctx, first, alice.ID, false)
-	if trades, _ := s.Trades(ctx, alice.ID, false, 10); len(trades) != 2 {
-		t.Fatalf("unsettling should bring it back: %+v", trades)
+func TestMigrateSettledTrades(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v1.db")
+	// A database from before the CONT workflow, with one trade settled.
+	s := newTestStoreAt(t, path)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	mustPlace(t, s, alice, "AIC", "NCC", 10, false)
+	s.Fill(ctx, 1, bob, 10)
+	s.Close()
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	for _, q := range []string{
+		`ALTER TABLE fills DROP COLUMN contractor_id`,
+		`ALTER TABLE fills DROP COLUMN cont_request_from`,
+		`ALTER TABLE fills DROP COLUMN cont_sent_at`,
+		`ALTER TABLE fills RENAME COLUMN owner_fulfilled_at TO owner_settled_at`,
+		`ALTER TABLE fills RENAME COLUMN filler_fulfilled_at TO filler_settled_at`,
+		`UPDATE fills SET owner_settled_at = 123`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+
+	s = newTestStoreAt(t, path)
+	trades, err := s.Trades(ctx, alice.ID, true, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trades) != 1 || !trades[0].Fulfilled || trades[0].Cont != ContSent {
+		t.Fatalf("settled trade should become fulfilled with a sent CONT: %+v", trades)
+	}
+	if trades, _ := s.Trades(ctx, bob.ID, false, 10); len(trades) != 1 || trades[0].Cont != ContSent {
+		t.Fatalf("bob should still need to fulfill: %+v", trades)
+	}
+}
+
+func newTestStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
+	s, err := OpenStore(path, "https://forex.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
 }
 
 func TestMigrateExistingDB(t *testing.T) {

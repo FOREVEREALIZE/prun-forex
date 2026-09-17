@@ -1,10 +1,10 @@
 {{define "live"}}
-<div id="live" class="live" hx-get="/fragments/live" hx-trigger="every 60s [liveIdle()], refresh from:body" hx-include="#pair-filter, #show-settled" hx-swap="outerHTML">
+<div id="live" class="live" hx-get="/fragments/live" hx-trigger="every 60s [liveIdle()], refresh from:body" hx-include="#pair-filter, #show-fulfilled" hx-swap="outerHTML">
   <section class="panel">
     <div class="panel-head">
       <h2 class="label">Open orders <span class="count">{{len .Board}}</span></h2>
       <div class="tools">
-        <select id="pair-filter" name="pair" aria-label="Filter by pair" hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#show-settled">
+        <select id="pair-filter" name="pair" aria-label="Filter by pair" hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#show-fulfilled">
           <option value="">All pairs</option>
           {{range .Pairs}}<option value="{{.}}"{{if eq . $.Pair}} selected{{end}}>{{pair .}}</option>{{end}}
         </select>
@@ -50,74 +50,114 @@
   </section>
 
   {{if .User}}
-  <div class="split">
-    <section class="panel">
-      <div class="panel-head"><h2 class="label">My orders</h2></div>
-      {{if .MyOrders}}
-      <div class="table-wrap">
-        <table class="grid">
-          <thead><tr><th>#</th><th>Pair</th><th class="num">Filled</th><th>Status</th><th class="act"></th></tr></thead>
-          <tbody>
-          {{range .MyOrders}}
-            <tr class="st-{{.Status}}">
-              <td class="id">{{.ID}}</td>
-              <td><span class="tick">{{.From}}</span><span class="arrow">→</span><span class="tick alt">{{.To}}</span></td>
-              <td class="num">
-                <b>{{num .Filled}}</b><span class="of">/{{num .Amount}}</span>
-                <span class="bar" aria-hidden="true"><i style="width:{{.Pct}}%"></i></span>
-              </td>
-              <td><span class="status {{.Status}}">{{.Status}}</span></td>
-              <td class="act">{{if eq .Status "open"}}<button class="btn danger small" hx-post="/orders/{{.ID}}/cancel" hx-swap="none" hx-confirm="Cancel order #{{.ID}}? Fills so far still stand.">Cancel</button>{{end}}</td>
-            </tr>
-          {{end}}
-          </tbody>
-        </table>
-      </div>
-      {{else}}
-        <p class="empty">You haven't posted any orders yet.</p>
+  <section class="panel">
+    <div class="panel-head">
+      <h2 class="label">Trades to settle</h2>
+      {{if or .FulfilledCount .ShowFulfilled}}
+      <label class="toggle">
+        <input type="checkbox" id="show-fulfilled" name="fulfilled" value="1"{{if .ShowFulfilled}} checked{{end}}
+          hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#pair-filter">
+        <span>Show fulfilled <span class="count">{{.FulfilledCount}}</span></span>
+      </label>
       {{end}}
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="label">Trades to settle</h2>
-        {{if or .SettledCount .ShowSettled}}
-        <label class="toggle">
-          <input type="checkbox" id="show-settled" name="settled" value="1"{{if .ShowSettled}} checked{{end}}
-            hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#pair-filter">
-          <span>Show settled <span class="count">{{.SettledCount}}</span></span>
-        </label>
+    </div>
+    {{if .Trades}}
+    <div class="table-wrap">
+      <table class="grid trades">
+        <thead><tr><th>Order</th><th>With</th><th class="num">You send</th><th class="num">You get</th><th class="num">When</th><th>CONT</th><th class="act"></th></tr></thead>
+        <tbody>
+        {{range .Trades}}
+          <tr class="cont-{{.Cont}}{{if .Fulfilled}} fulfilled{{end}}">
+            <td class="id">{{.OrderID}}</td>
+            <td class="trader">{{.Counterparty}}</td>
+            <td class="num send">{{num .Amount}} <span class="tick">{{.Send}}</span></td>
+            <td class="num recv">{{num .Amount}} <span class="tick alt">{{.Receive}}</span></td>
+            <td class="num muted">{{ago .CreatedAt}}</td>
+            <td class="state">
+              {{if .Fulfilled}}
+                <span class="chip ok">Fulfilled</span>
+                <span class="sub">{{if .TheyFulfilled}}by both sides{{else}}waiting for {{.Counterparty}}{{end}}</span>
+              {{else if eq .Cont "undecided"}}
+                <span class="chip warn">Who sends it?</span>
+              {{else if eq .Cont "asked-them"}}
+                <span class="chip">Asked {{.Counterparty}}</span>
+                <span class="sub">waiting for them to accept</span>
+              {{else if eq .Cont "asked-me"}}
+                <span class="chip warn">{{.Counterparty}} asks you</span>
+                <span class="sub">to send the CONT</span>
+              {{else if eq .Cont "mine"}}
+                <span class="chip warn">You send it</span>
+              {{else if eq .Cont "theirs"}}
+                <span class="chip">{{.Counterparty}} sends it</span>
+                <span class="sub">waiting for the CONT</span>
+              {{else if eq .Cont "sent-by-me"}}
+                <span class="chip ok">You sent it</span>
+                {{if .TheyFulfilled}}<span class="sub">{{.Counterparty}} marked it fulfilled</span>{{end}}
+              {{else if eq .Cont "sent-by-them"}}
+                <span class="chip ok">{{.Counterparty}} sent it</span>
+                <span class="sub">{{if .TheyFulfilled}}{{.Counterparty}} marked it fulfilled{{else}}accept it in-game{{end}}</span>
+              {{else}}
+                <span class="chip ok">Sent</span>
+              {{end}}
+            </td>
+            <td class="act">
+              <div class="acts">
+              {{if .Fulfilled}}
+                {{template "cont-btn" (contBtn .FillID "unfulfill" "ghost" "Undo")}}
+              {{else if eq .Cont "undecided"}}
+                {{template "cont-btn" (contBtn .FillID "self" "primary" "I'll send it")}}
+                {{template "cont-btn" (contBtn .FillID "request" "ghost" "Ask them")}}
+              {{else if eq .Cont "asked-them"}}
+                {{template "cont-btn" (contBtn .FillID "self" "ghost" "I'll send it instead")}}
+              {{else if eq .Cont "asked-me"}}
+                {{template "cont-btn" (contBtn .FillID "self" "primary" "Accept")}}
+                {{template "cont-btn" (contBtn .FillID "request" "ghost" "Ask them instead")}}
+              {{else if eq .Cont "mine"}}
+                {{template "cont-btn" (contBtn .FillID "sent" "primary" "CONT sent")}}
+              {{else if eq .Cont "theirs"}}
+              {{else}}
+                {{template "cont-btn" (contBtn .FillID "fulfill" "settle" "✓ Fulfilled")}}
+              {{end}}
+              </div>
+            </td>
+          </tr>
         {{end}}
-      </div>
-      {{if .Trades}}
-      <div class="table-wrap">
-        <table class="grid">
-          <thead><tr><th>Order</th><th>With</th><th class="num">You send</th><th class="num">You get</th><th class="num">When</th><th class="act"></th></tr></thead>
-          <tbody>
-          {{range .Trades}}
-            <tr{{if .Settled}} class="settled"{{end}}>
-              <td class="id">{{.OrderID}}</td>
-              <td class="trader">{{.Counterparty}}</td>
-              <td class="num send">{{num .Amount}} <span class="tick">{{.Send}}</span></td>
-              <td class="num recv">{{num .Amount}} <span class="tick alt">{{.Receive}}</span></td>
-              <td class="num muted">{{ago .CreatedAt}}</td>
-              <td class="act">
-                {{if .Settled}}
-                  <button class="btn ghost small" hx-post="/fills/{{.FillID}}/settle" hx-vals='{"settled":"0"}' hx-swap="none" title="Move back to trades to settle">Undo</button>
-                {{else}}
-                  <button class="btn settle small" hx-post="/fills/{{.FillID}}/settle" hx-vals='{"settled":"1"}' hx-swap="none" title="You've sent and received this in-game">✓ Settled</button>
-                {{end}}
-              </td>
-            </tr>
-          {{end}}
-          </tbody>
-        </table>
-      </div>
-      {{else}}
-        <p class="empty">{{if .SettledCount}}All settled. Nothing left to pay or collect.{{else}}No trades yet. Your fills show up here with who to pay.{{end}}</p>
-      {{end}}
-    </section>
-  </div>
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+      <p class="empty">{{if .FulfilledCount}}All fulfilled. Nothing left to pay or collect.{{else}}No trades yet. Your fills show up here with who to pay.{{end}}</p>
+    {{end}}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2 class="label">My orders</h2></div>
+    {{if .MyOrders}}
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>#</th><th>Pair</th><th class="num">Filled</th><th>Status</th><th class="act"></th></tr></thead>
+        <tbody>
+        {{range .MyOrders}}
+          <tr class="st-{{.Status}}">
+            <td class="id">{{.ID}}</td>
+            <td><span class="tick">{{.From}}</span><span class="arrow">→</span><span class="tick alt">{{.To}}</span></td>
+            <td class="num">
+              <b>{{num .Filled}}</b><span class="of">/{{num .Amount}}</span>
+              <span class="bar" aria-hidden="true"><i style="width:{{.Pct}}%"></i></span>
+            </td>
+            <td><span class="status {{.Status}}">{{.Status}}</span></td>
+            <td class="act">{{if eq .Status "open"}}<button class="btn danger small" hx-post="/orders/{{.ID}}/cancel" hx-swap="none" hx-confirm="Cancel order #{{.ID}}? Fills so far still stand.">Cancel</button>{{end}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+      <p class="empty">You haven't posted any orders yet.</p>
+    {{end}}
+  </section>
   {{end}}
 </div>
 {{end}}
+
+{{define "cont-btn"}}<button class="btn {{.Style}} small" type="button" hx-post="/fills/{{.FillID}}/cont" hx-vals='{"action":"{{.Action}}"}' hx-swap="none" hx-disabled-elt="this">{{.Label}}</button>{{end}}

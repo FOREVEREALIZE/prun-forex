@@ -22,8 +22,11 @@ type Server struct {
 
 func NewServer(cfg Config, store *Store, bot *Bot) (*Server, error) {
 	tmpl, err := template.New("").Funcs(template.FuncMap{
-		"ago":  ago,
-		"num":  formatInt,
+		"ago": ago,
+		"num": formatInt,
+		"contBtn": func(fillID int64, action, style, label string) map[string]any {
+			return map[string]any{"FillID": fillID, "Action": action, "Style": style, "Label": label}
+		},
 		"add":  func(a, b int64) int64 { return a + b },
 		"pair": func(p string) string { return strings.Replace(p, "-", " → ", 1) },
 	}).ParseFS(templateFS, "templates/*.html")
@@ -54,7 +57,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /orders", s.action(s.handlePlace))
 	mux.HandleFunc("POST /orders/{id}/fill", s.action(s.handleFill))
 	mux.HandleFunc("POST /orders/{id}/cancel", s.action(s.handleCancel))
-	mux.HandleFunc("POST /fills/{id}/settle", s.action(s.handleSettle))
+	mux.HandleFunc("POST /fills/{id}/cont", s.action(s.handleCont))
 
 	mux.HandleFunc("GET /api/orders", s.handleAPIOrders)
 	mux.HandleFunc("GET /api/orders/{id}", s.handleAPIOrder)
@@ -111,10 +114,10 @@ type LiveData struct {
 	Board    []Order
 	MyOrders []Order
 	Trades   []Trade
-	// Settled trades are hidden unless ShowSettled.
-	ShowSettled  bool
-	SettledCount int
-	UpdatedAt    time.Time
+	// Trades the user marked fulfilled are hidden unless ShowFulfilled.
+	ShowFulfilled  bool
+	FulfilledCount int
+	UpdatedAt      time.Time
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -171,11 +174,11 @@ func (s *Server) liveData(r *http.Request, u *User) (*LiveData, error) {
 		if d.MyOrders, err = s.store.ListOrders(ctx, OrderFilter{UserID: u.ID, Limit: 30}); err != nil {
 			return nil, err
 		}
-		d.ShowSettled = r.URL.Query().Get("settled") == "1"
-		if d.Trades, err = s.store.Trades(ctx, u.ID, d.ShowSettled, 50); err != nil {
+		d.ShowFulfilled = r.URL.Query().Get("fulfilled") == "1"
+		if d.Trades, err = s.store.Trades(ctx, u.ID, d.ShowFulfilled, 50); err != nil {
 			return nil, err
 		}
-		if d.SettledCount, err = s.store.SettledCount(ctx, u.ID); err != nil {
+		if d.FulfilledCount, err = s.store.FulfilledCount(ctx, u.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -344,15 +347,16 @@ func (s *Server) handleFill(w http.ResponseWriter, r *http.Request, u *User) {
 	s.toast(w, "ok", fmt.Sprintf("Filled %s on order #%d. The owner has been notified.", formatInt(n), id))
 }
 
-func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request, u *User) {
+func (s *Server) handleCont(w http.ResponseWriter, r *http.Request, u *User) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	settled := r.FormValue("settled") != "0"
+	action := ContAction(r.FormValue("action"))
 	w.Header().Set("HX-Trigger", "refresh")
-	if err := s.store.SetSettled(r.Context(), id, u.ID, settled); err != nil {
+	other, err := s.store.ContAct(r.Context(), id, u, action)
+	if err != nil {
 		if isUserError(err) {
 			s.toast(w, "err", err.Error())
 		} else {
@@ -360,8 +364,15 @@ func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request, u *User) {
 		}
 		return
 	}
-	if settled {
-		s.toast(w, "ok", "Trade marked settled. Tick “Show settled” to see it again.")
+	switch action {
+	case ActSendMyself:
+		s.toast(w, "ok", fmt.Sprintf("You're sending the CONT. Mark it sent once it's out; %s gets a DM.", other))
+	case ActRequest:
+		s.toast(w, "ok", fmt.Sprintf("Asked %s to send the CONT. They get a DM.", other))
+	case ActMarkSent:
+		s.toast(w, "ok", fmt.Sprintf("CONT marked sent. %s gets a DM to accept it.", other))
+	case ActFulfill:
+		s.toast(w, "ok", "Marked fulfilled. Tick “Show fulfilled” to see it again.")
 	}
 }
 

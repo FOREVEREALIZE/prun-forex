@@ -128,7 +128,6 @@ main.wrap { flex: 1; padding-top: 24px; padding-bottom: 32px; display: grid; gap
 .updated { font: 11px var(--mono); color: var(--muted); }
 .empty { margin: 0; padding: 28px 16px; color: var(--muted); font-family: var(--mono); font-size: 13px; }
 .live { display: grid; gap: 20px; min-width: 0; }
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 
 /* ── Form controls ── */
 input, select {
@@ -199,9 +198,23 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .status.filled { color: var(--green); background: var(--green-dim); }
 .status.cancelled { color: var(--red); background: var(--red-dim); }
 
-.grid tr.settled td { color: var(--muted); }
-.grid tr.settled .tick, .grid tr.settled .recv { color: var(--muted); border-color: var(--line); }
-.grid tr.settled .num:not(.muted) { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.grid tr.fulfilled td { color: var(--muted); }
+.grid tr.fulfilled .tick, .grid tr.fulfilled .recv { color: var(--muted); border-color: var(--line); }
+.grid tr.fulfilled .num:not(.muted) { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.grid tr.cont-asked-me:not(.fulfilled) td:first-child,
+.grid tr.cont-mine:not(.fulfilled) td:first-child,
+.grid tr.cont-undecided:not(.fulfilled) td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.grid .state { white-space: normal; min-width: 150px; }
+.chip {
+  display: inline-block; font: 600 10px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  padding: 4px 6px; color: var(--text); background: var(--panel-2); border: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+.chip.warn { color: var(--accent); background: var(--accent-dim); border-color: rgba(247,165,2,.35); }
+.chip.ok { color: var(--green); background: var(--green-dim); border-color: rgba(93,184,91,.35); }
+.grid tr.fulfilled .chip.ok { color: var(--muted); background: transparent; border-color: var(--line); }
+.sub { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.acts { display: flex; gap: 6px; justify-content: flex-end; }
 .toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .toggle input {
   appearance: none; width: 14px; height: 14px; margin: 0; padding: 0; border: 1px solid var(--line-strong); background: var(--bg); cursor: pointer; display: grid; place-content: center;
@@ -280,9 +293,6 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 
 .htmx-request.panel, #live.htmx-request { opacity: .85; }
 
-@media (max-width: 860px) {
-  .split { grid-template-columns: 1fr; }
-}
 @media (max-width: 560px) {
   body { font-size: 14px; }
   main.wrap { padding-top: 16px; gap: 16px; }

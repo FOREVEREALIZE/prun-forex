@@ -29,6 +29,8 @@ SESSION_KEY=$(openssl rand -hex 32) BASE_URL=https://forex.example.com \
 3. **General → Interactions Endpoint URL**: `$BASE_URL/discord/interactions`. For local dev, expose the server with `cloudflared tunnel --url localhost:8080`.
 4. **Bot**: copy the token into `DISCORD_BOT_TOKEN`.
 
+Settling a trade: under **Trades to settle**, one side volunteers to send the CONT, or asks the other, who can accept or ask back (each request DMs the other side). The sender marks the CONT sent, then each side marks the trade fulfilled, which hides it for them. Tick **Show fulfilled** to see those again.
+
 Before a user can trade, they add the app, DM the bot and run `/link`. If a DM later fails with "cannot send messages to this user", they're unlinked and have to run `/link` again.
 
 ## JSON API

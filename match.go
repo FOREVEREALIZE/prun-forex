@@ -178,10 +178,15 @@ func (s *Store) applyFill(ctx context.Context, tx *sql.Tx, o Order, filler *User
 		o.ID, filler.ID, n, now); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	return queueDM(ctx, tx, o.UserID, s.fillMessage(o, filler, n))
+}
+
+// queueDM adds a DM to the outbox, if the user is still linked.
+func queueDM(ctx context.Context, tx *sql.Tx, userID int64, msg string) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO notifications (user_id, message, next_at)
 		SELECT id, ?, ? FROM users WHERE id = ? AND linked_at IS NOT NULL`,
-		s.fillMessage(o, filler, n), now, o.UserID)
+		msg, time.Now().Unix(), userID)
 	return err
 }
 
@@ -193,7 +198,7 @@ func (s *Store) fillMessage(o Order, filler *User, n int64) string {
 	} else {
 		head += fmt.Sprintf(": **%d / %d** still open", left, o.Amount)
 	}
-	msg := fmt.Sprintf("%s\nSend them **%d %s** in-game; they send you **%d %s**.", head, n, o.From, n, o.To)
+	msg := fmt.Sprintf("%s\nYou send them **%d %s**; they send you **%d %s**. Decide on the site who sends the CONT.", head, n, o.From, n, o.To)
 	if filler.DiscordID != "" && !isDevID(filler.DiscordID) {
 		msg += fmt.Sprintf("\nContact: <@%s>", filler.DiscordID)
 	}
