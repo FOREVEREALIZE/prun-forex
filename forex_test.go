@@ -72,7 +72,7 @@ func TestFullMatch(t *testing.T) {
 	if len(open) != 1 || open[0].Remaining != 40 {
 		t.Fatalf("expected one order with 40 left, got %+v", open)
 	}
-	trades, _ := s.Trades(ctx, bob.ID, 10)
+	trades, _ := s.Trades(ctx, bob.ID, false, 10)
 	if len(trades) != 2 || trades[0].Send != "NCC" || trades[0].Receive != "AIC" || trades[0].Counterparty != "alice" {
 		t.Fatalf("unexpected trades for bob: %+v", trades)
 	}
@@ -137,6 +137,65 @@ func TestIncreaseExistingOrder(t *testing.T) {
 	if _, err := s.PlaceOrder(ctx, alice, "AIC", "NCC", 5, false, 1); !isUserError(err) {
 		t.Fatalf("topping up a cancelled order: %v", err)
 	}
+}
+
+func TestSettleTrades(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, bob, carol := newUser(t, s, "alice"), newUser(t, s, "bob"), newUser(t, s, "carol")
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+	s.Fill(ctx, 1, bob, 30)
+	s.Fill(ctx, 1, bob, 20)
+
+	trades, _ := s.Trades(ctx, alice.ID, false, 10)
+	if len(trades) != 2 {
+		t.Fatalf("expected 2 trades, got %d", len(trades))
+	}
+	first := trades[0].FillID
+	if err := s.SetSettled(ctx, first, carol.ID, true); !isUserError(err) {
+		t.Fatalf("stranger settling a trade: %v", err)
+	}
+	if err := s.SetSettled(ctx, first, alice.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hidden for alice, still visible for bob.
+	if trades, _ := s.Trades(ctx, alice.ID, false, 10); len(trades) != 1 || trades[0].FillID == first {
+		t.Fatalf("settled trade should be hidden for alice: %+v", trades)
+	}
+	if trades, _ := s.Trades(ctx, bob.ID, false, 10); len(trades) != 2 {
+		t.Fatalf("bob's view shouldn't change: %+v", trades)
+	}
+	all, _ := s.Trades(ctx, alice.ID, true, 10)
+	if len(all) != 2 || all[1].FillID != first || !all[1].Settled || all[0].Settled {
+		t.Fatalf("show-settled should list it last, marked settled: %+v", all)
+	}
+	if n, _ := s.SettledCount(ctx, alice.ID); n != 1 {
+		t.Fatalf("settled count for alice = %d", n)
+	}
+	if n, _ := s.SettledCount(ctx, bob.ID); n != 0 {
+		t.Fatalf("settled count for bob = %d", n)
+	}
+
+	s.SetSettled(ctx, first, alice.ID, false)
+	if trades, _ := s.Trades(ctx, alice.ID, false, 10); len(trades) != 2 {
+		t.Fatalf("unsettling should bring it back: %+v", trades)
+	}
+}
+
+func TestMigrateExistingDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := OpenStore(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	// Reopening must not re-run migrations.
+	s, err = OpenStore(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
 }
 
 func TestKeepModeDoesNotFill(t *testing.T) {

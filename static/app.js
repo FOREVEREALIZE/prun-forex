@@ -37,8 +37,8 @@ document.addEventListener('orderPlaced', () => {
   if (f) f.amount.value = '';
 });
 
-// Skip the periodic refresh while someone is typing in the board.
+// Skip the periodic refresh while someone is typing an amount in the board.
 function liveIdle() {
   const a = document.activeElement;
-  return !(a && a.closest('#live') && (a.tagName === 'INPUT' || a.tagName === 'SELECT'));
+  return !(a && a.closest('#live') && a.matches('input[type=number]'));
 }

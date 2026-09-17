@@ -105,7 +105,44 @@ func OpenStore(path, baseURL string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db, baseURL: baseURL}, nil
+}
+
+// migrations run in order on top of schema; PRAGMA user_version tracks how
+// many have been applied. Only ever append to this list.
+var migrations = []string{
+	// Each side of a fill marks it settled on their own.
+	`ALTER TABLE fills ADD COLUMN owner_settled_at INTEGER;
+	 ALTER TABLE fills ADD COLUMN filler_settled_at INTEGER;`,
+}
+
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	for i := version; i < len(migrations); i++ {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", i+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -151,12 +188,14 @@ type Fill struct {
 
 // Trade is a fill seen from one user's side: what they send and receive in-game.
 type Trade struct {
+	FillID       int64
 	OrderID      int64
 	Counterparty string
 	Amount       int64
 	Send         string
 	Receive      string
 	CreatedAt    time.Time
+	Settled      bool
 }
 
 // UpsertUser creates or refreshes a user by Discord ID. With link=true it also
@@ -311,16 +350,18 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (*Order, error) {
 }
 
 // Trades lists fills the user took part in, as owner or filler, newest first.
-func (s *Store) Trades(ctx context.Context, userID int64, limit int) ([]Trade, error) {
+// Fills the user has marked settled are left out unless includeSettled.
+func (s *Store) Trades(ctx context.Context, userID int64, includeSettled bool, limit int) ([]Trade, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT o.id, o.user_id, owner.username, filler.username, o.from_cur, o.to_cur, f.amount, f.created_at
+		SELECT f.id, o.id, o.user_id, owner.username, filler.username, o.from_cur, o.to_cur, f.amount, f.created_at,
+			CASE WHEN o.user_id = ?1 THEN f.owner_settled_at ELSE f.filler_settled_at END IS NOT NULL AS settled
 		FROM fills f
 		JOIN orders o ON o.id = f.order_id
 		JOIN users owner ON owner.id = o.user_id
 		JOIN users filler ON filler.id = f.filler_id
-		WHERE o.user_id = ? OR f.filler_id = ?
-		ORDER BY f.created_at DESC, f.id DESC
-		LIMIT ?`, userID, userID, limit)
+		WHERE (o.user_id = ?1 OR f.filler_id = ?1) AND (?2 OR settled = 0)
+		ORDER BY settled, f.created_at DESC, f.id DESC
+		LIMIT ?3`, userID, includeSettled, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +371,7 @@ func (s *Store) Trades(ctx context.Context, userID int64, limit int) ([]Trade, e
 		var t Trade
 		var ownerID, created int64
 		var owner, filler, from, to string
-		if err := rows.Scan(&t.OrderID, &ownerID, &owner, &filler, &from, &to, &t.Amount, &created); err != nil {
+		if err := rows.Scan(&t.FillID, &t.OrderID, &ownerID, &owner, &filler, &from, &to, &t.Amount, &created, &t.Settled); err != nil {
 			return nil, err
 		}
 		t.CreatedAt = time.Unix(created, 0)
@@ -343,6 +384,37 @@ func (s *Store) Trades(ctx context.Context, userID int64, limit int) ([]Trade, e
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// SettledCount is how many of the user's trades they've marked settled.
+func (s *Store) SettledCount(ctx context.Context, userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM fills f JOIN orders o ON o.id = f.order_id
+		WHERE (o.user_id = ?1 AND f.owner_settled_at IS NOT NULL)
+		   OR (f.filler_id = ?1 AND f.filler_settled_at IS NOT NULL)`, userID).Scan(&n)
+	return n, err
+}
+
+// SetSettled marks (or unmarks) a fill as settled from the user's side only.
+func (s *Store) SetSettled(ctx context.Context, fillID, userID int64, settled bool) error {
+	var at any
+	if settled {
+		at = time.Now().Unix()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE fills SET
+			owner_settled_at = CASE WHEN (SELECT user_id FROM orders WHERE id = fills.order_id) = ?2 THEN ?1 ELSE owner_settled_at END,
+			filler_settled_at = CASE WHEN filler_id = ?2 THEN ?1 ELSE filler_settled_at END
+		WHERE id = ?3 AND (filler_id = ?2 OR (SELECT user_id FROM orders WHERE id = fills.order_id) = ?2)`,
+		at, userID, fillID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return userError("Trade not found.")
+	}
+	return nil
 }
 
 func (s *Store) Cancel(ctx context.Context, orderID, userID int64) error {

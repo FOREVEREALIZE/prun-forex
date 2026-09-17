@@ -87,6 +87,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.2; letter-spacing: -.01
 .btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); }
 .btn.danger { background: var(--red); color: #fff; }
+.btn.settle { background: var(--green-dim); color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+.btn.settle:hover { background: var(--green); color: var(--accent-ink); }
 .btn.ghost {
   background: transparent; color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -197,6 +199,16 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .status.filled { color: var(--green); background: var(--green-dim); }
 .status.cancelled { color: var(--red); background: var(--red-dim); }
 
+.grid tr.settled td { color: var(--muted); }
+.grid tr.settled .tick, .grid tr.settled .recv { color: var(--muted); border-color: var(--line); }
+.grid tr.settled .num:not(.muted) { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.toggle input {
+  appearance: none; width: 14px; height: 14px; margin: 0; padding: 0; border: 1px solid var(--line-strong); background: var(--bg); cursor: pointer; display: grid; place-content: center;
+}
+.toggle input:checked { background: var(--accent); border-color: var(--accent); }
+.toggle input:checked::after { content: ""; width: 6px; height: 6px; background: var(--accent-ink); }
+.toggle:hover { color: var(--text); }
 .fill { display: flex; gap: 6px; justify-content: flex-end; }
 .fill input { width: 92px; height: 30px; font-size: 13px; text-align: right; }
 

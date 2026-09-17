@@ -54,6 +54,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /orders", s.action(s.handlePlace))
 	mux.HandleFunc("POST /orders/{id}/fill", s.action(s.handleFill))
 	mux.HandleFunc("POST /orders/{id}/cancel", s.action(s.handleCancel))
+	mux.HandleFunc("POST /fills/{id}/settle", s.action(s.handleSettle))
 
 	mux.HandleFunc("GET /api/orders", s.handleAPIOrders)
 	mux.HandleFunc("GET /api/orders/{id}", s.handleAPIOrder)
@@ -104,13 +105,16 @@ type PageData struct {
 }
 
 type LiveData struct {
-	User      *User
-	Pair      string
-	Pairs     []string
-	Board     []Order
-	MyOrders  []Order
-	Trades    []Trade
-	UpdatedAt time.Time
+	User     *User
+	Pair     string
+	Pairs    []string
+	Board    []Order
+	MyOrders []Order
+	Trades   []Trade
+	// Settled trades are hidden unless ShowSettled.
+	ShowSettled  bool
+	SettledCount int
+	UpdatedAt    time.Time
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +171,11 @@ func (s *Server) liveData(r *http.Request, u *User) (*LiveData, error) {
 		if d.MyOrders, err = s.store.ListOrders(ctx, OrderFilter{UserID: u.ID, Limit: 30}); err != nil {
 			return nil, err
 		}
-		if d.Trades, err = s.store.Trades(ctx, u.ID, 30); err != nil {
+		d.ShowSettled = r.URL.Query().Get("settled") == "1"
+		if d.Trades, err = s.store.Trades(ctx, u.ID, d.ShowSettled, 50); err != nil {
+			return nil, err
+		}
+		if d.SettledCount, err = s.store.SettledCount(ctx, u.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -334,6 +342,27 @@ func (s *Server) handleFill(w http.ResponseWriter, r *http.Request, u *User) {
 		return
 	}
 	s.toast(w, "ok", fmt.Sprintf("Filled %s on order #%d. The owner has been notified.", formatInt(n), id))
+}
+
+func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request, u *User) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	settled := r.FormValue("settled") != "0"
+	w.Header().Set("HX-Trigger", "refresh")
+	if err := s.store.SetSettled(r.Context(), id, u.ID, settled); err != nil {
+		if isUserError(err) {
+			s.toast(w, "err", err.Error())
+		} else {
+			serverError(w, err)
+		}
+		return
+	}
+	if settled {
+		s.toast(w, "ok", "Trade marked settled. Tick “Show settled” to see it again.")
+	}
 }
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, u *User) {

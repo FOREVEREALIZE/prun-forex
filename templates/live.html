@@ -1,10 +1,10 @@
 {{define "live"}}
-<div id="live" class="live" hx-get="/fragments/live" hx-trigger="every 60s [liveIdle()], refresh from:body" hx-include="#pair-filter" hx-swap="outerHTML">
+<div id="live" class="live" hx-get="/fragments/live" hx-trigger="every 60s [liveIdle()], refresh from:body" hx-include="#pair-filter, #show-settled" hx-swap="outerHTML">
   <section class="panel">
     <div class="panel-head">
       <h2 class="label">Open orders <span class="count">{{len .Board}}</span></h2>
       <div class="tools">
-        <select id="pair-filter" name="pair" aria-label="Filter by pair" hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change">
+        <select id="pair-filter" name="pair" aria-label="Filter by pair" hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#show-settled">
           <option value="">All pairs</option>
           {{range .Pairs}}<option value="{{.}}"{{if eq . $.Pair}} selected{{end}}>{{pair .}}</option>{{end}}
         </select>
@@ -79,26 +79,42 @@
     </section>
 
     <section class="panel">
-      <div class="panel-head"><h2 class="label">Trades to settle</h2></div>
+      <div class="panel-head">
+        <h2 class="label">Trades to settle</h2>
+        {{if or .SettledCount .ShowSettled}}
+        <label class="toggle">
+          <input type="checkbox" id="show-settled" name="settled" value="1"{{if .ShowSettled}} checked{{end}}
+            hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change" hx-include="#pair-filter">
+          <span>Show settled <span class="count">{{.SettledCount}}</span></span>
+        </label>
+        {{end}}
+      </div>
       {{if .Trades}}
       <div class="table-wrap">
         <table class="grid">
-          <thead><tr><th>Order</th><th>With</th><th class="num">You send</th><th class="num">You get</th><th class="num">When</th></tr></thead>
+          <thead><tr><th>Order</th><th>With</th><th class="num">You send</th><th class="num">You get</th><th class="num">When</th><th class="act"></th></tr></thead>
           <tbody>
           {{range .Trades}}
-            <tr>
+            <tr{{if .Settled}} class="settled"{{end}}>
               <td class="id">{{.OrderID}}</td>
               <td class="trader">{{.Counterparty}}</td>
               <td class="num send">{{num .Amount}} <span class="tick">{{.Send}}</span></td>
               <td class="num recv">{{num .Amount}} <span class="tick alt">{{.Receive}}</span></td>
               <td class="num muted">{{ago .CreatedAt}}</td>
+              <td class="act">
+                {{if .Settled}}
+                  <button class="btn ghost small" hx-post="/fills/{{.FillID}}/settle" hx-vals='{"settled":"0"}' hx-swap="none" title="Move back to trades to settle">Undo</button>
+                {{else}}
+                  <button class="btn settle small" hx-post="/fills/{{.FillID}}/settle" hx-vals='{"settled":"1"}' hx-swap="none" title="You've sent and received this in-game">✓ Settled</button>
+                {{end}}
+              </td>
             </tr>
           {{end}}
           </tbody>
         </table>
       </div>
       {{else}}
-        <p class="empty">No trades yet. Your fills show up here with who to pay.</p>
+        <p class="empty">{{if .SettledCount}}All settled. Nothing left to pay or collect.{{else}}No trades yet. Your fills show up here with who to pay.{{end}}</p>
       {{end}}
     </section>
   </div>
