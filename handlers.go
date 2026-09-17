@@ -88,7 +88,7 @@ func (s *Server) action(h func(http.ResponseWriter, *http.Request, *User)) http.
 		switch {
 		case u == nil:
 			s.toast(w, "err", "Sign in with Discord first.")
-		case !u.Linked:
+		case !u.Ready():
 			w.Header().Set("HX-Refresh", "true")
 		default:
 			h(w, r, u)
@@ -131,7 +131,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		DevLogin:   s.cfg.DevLogin,
 		Currencies: Currencies,
 	}
-	if u == nil || u.Linked {
+	if u == nil || u.Ready() {
 		live, err := s.liveData(r, u)
 		if err != nil {
 			serverError(w, err)
@@ -170,7 +170,7 @@ func (s *Server) liveData(r *http.Request, u *User) (*LiveData, error) {
 	if d.Board, err = s.store.ListOrders(ctx, f); err != nil {
 		return nil, err
 	}
-	if u != nil && u.Linked {
+	if u != nil && u.Ready() {
 		if d.MyOrders, err = s.store.ListOrders(ctx, OrderFilter{UserID: u.ID, Limit: 30}); err != nil {
 			return nil, err
 		}
@@ -186,7 +186,7 @@ func (s *Server) liveData(r *http.Request, u *User) (*LiveData, error) {
 }
 
 func (s *Server) handleLinkStatus(w http.ResponseWriter, r *http.Request) {
-	if u := currentUser(r); u == nil || u.Linked {
+	if u := currentUser(r); u == nil || u.Ready() {
 		w.Header().Set("HX-Refresh", "true")
 	}
 	w.WriteHeader(http.StatusNoContent)

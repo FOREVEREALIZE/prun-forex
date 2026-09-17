@@ -176,6 +176,8 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .grid .id { font: 12px var(--mono); color: var(--muted); }
 .grid .id::before { content: "#"; opacity: .5; }
 .grid .trader { font-weight: 500; }
+.trader-name { display: block; white-space: nowrap; }
+.handle { display: block; margin-top: 2px; font: 400 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .grid tr.mine { background: var(--accent-dim); }
 .grid tr.mine td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 .of { color: var(--muted); font-size: 12px; }

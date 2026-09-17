@@ -19,6 +19,7 @@ SESSION_KEY=$(openssl rand -hex 32) BASE_URL=https://forex.example.com \
 | `SESSION_KEY` | ≥32 chars, signs the session cookie |
 | `BASE_URL` | Public URL, default `http://localhost:8080` |
 | `ADDR` / `DB_PATH` | Default `:8080` / `forex.db` |
+| `FNAR_URL` | FIO REST API used to look up companies, default `https://rest.fnar.net` |
 | `DISCORD_INVITE_URL` | Optional server invite shown as a fallback when DMs don't get through |
 | `DEV_LOGIN=1` | **Local only**: enables `/dev/login?name=alice` (add `&unlinked=1` to test the link gate), so you don't need Discord |
 
@@ -31,7 +32,7 @@ SESSION_KEY=$(openssl rand -hex 32) BASE_URL=https://forex.example.com \
 
 Settling a trade: under **Trades to settle**, one side volunteers to send the CONT, or asks the other, who can accept or ask back (each request DMs the other side). The sender marks the CONT sent, then each side marks the trade fulfilled, which hides it for them. Tick **Show fulfilled** to see those again.
 
-Before a user can trade, they add the app, DM the bot and run `/link`. If a DM later fails with "cannot send messages to this user", they're unlinked and have to run `/link` again.
+Before a user can trade, they add the app, DM the bot and run `/link company_code:ABCD` with their in-game company code. The bot looks the company up on FNAR, shows who owns it and which corporation it's in, and asks the user to confirm with Yes/No. On Yes it stores the company code, the in-game username and the corporation code. Traders then show as `[CORP] Username | CODE` with their `@discord` handle underneath. Each company can only be linked to one Discord account. Users who linked before company codes existed are sent back through onboarding on the site, with an explanation, until they run `/link` again. If a DM later fails with "cannot send messages to this user", they're unlinked and have to run `/link` again.
 
 ## JSON API
 

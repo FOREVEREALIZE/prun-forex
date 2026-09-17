@@ -19,7 +19,7 @@
         {{range .Board}}
           <tr{{if and $.User (eq .UserID $.User.ID)}} class="mine"{{end}}>
             <td class="id">{{.ID}}</td>
-            <td class="trader">{{.Owner}}</td>
+            <td class="trader">{{template "trader" .Owner}}</td>
             <td><span class="tick">{{.From}}</span></td>
             <td><span class="tick alt">{{.To}}</span></td>
             <td class="num">
@@ -69,33 +69,33 @@
         {{range .Trades}}
           <tr class="cont-{{.Cont}}{{if .Fulfilled}} fulfilled{{end}}">
             <td class="id">{{.OrderID}}</td>
-            <td class="trader">{{.Counterparty}}</td>
+            <td class="trader">{{template "trader" .Counterparty}}</td>
             <td class="num send">{{num .Amount}} <span class="tick">{{.Send}}</span></td>
             <td class="num recv">{{num .Amount}} <span class="tick alt">{{.Receive}}</span></td>
             <td class="num muted">{{ago .CreatedAt}}</td>
             <td class="state">
               {{if .Fulfilled}}
                 <span class="chip ok">Fulfilled</span>
-                <span class="sub">{{if .TheyFulfilled}}by both sides{{else}}waiting for {{.Counterparty}}{{end}}</span>
+                <span class="sub">{{if .TheyFulfilled}}by both sides{{else}}waiting for {{.Counterparty.Short}}{{end}}</span>
               {{else if eq .Cont "undecided"}}
                 <span class="chip warn">Who sends it?</span>
               {{else if eq .Cont "asked-them"}}
-                <span class="chip">Asked {{.Counterparty}}</span>
+                <span class="chip">Asked {{.Counterparty.Short}}</span>
                 <span class="sub">waiting for them to accept</span>
               {{else if eq .Cont "asked-me"}}
-                <span class="chip warn">{{.Counterparty}} asks you</span>
+                <span class="chip warn">{{.Counterparty.Short}} asks you</span>
                 <span class="sub">to send the CONT</span>
               {{else if eq .Cont "mine"}}
                 <span class="chip warn">You send it</span>
               {{else if eq .Cont "theirs"}}
-                <span class="chip">{{.Counterparty}} sends it</span>
+                <span class="chip">{{.Counterparty.Short}} sends it</span>
                 <span class="sub">waiting for the CONT</span>
               {{else if eq .Cont "sent-by-me"}}
                 <span class="chip ok">You sent it</span>
-                {{if .TheyFulfilled}}<span class="sub">{{.Counterparty}} marked it fulfilled</span>{{end}}
+                {{if .TheyFulfilled}}<span class="sub">{{.Counterparty.Short}} marked it fulfilled</span>{{end}}
               {{else if eq .Cont "sent-by-them"}}
-                <span class="chip ok">{{.Counterparty}} sent it</span>
-                <span class="sub">{{if .TheyFulfilled}}{{.Counterparty}} marked it fulfilled{{else}}accept it in-game{{end}}</span>
+                <span class="chip ok">{{.Counterparty.Short}} sent it</span>
+                <span class="sub">{{if .TheyFulfilled}}{{.Counterparty.Short}} marked it fulfilled{{else}}accept it in-game{{end}}</span>
               {{else}}
                 <span class="chip ok">Sent</span>
               {{end}}
@@ -161,3 +161,5 @@
 {{end}}
 
 {{define "cont-btn"}}<button class="btn {{.Style}} small" type="button" hx-post="/fills/{{.FillID}}/cont" hx-vals='{"action":"{{.Action}}"}' hx-swap="none" hx-disabled-elt="this">{{.Label}}</button>{{end}}
+
+{{define "trader"}}<span class="trader-name">{{.Name}}</span>{{if .CompanyCode}}<span class="handle">@{{.Handle}}</span>{{end}}{{end}}

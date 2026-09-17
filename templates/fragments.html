@@ -20,7 +20,7 @@
     <thead><tr><th>#</th><th>Trader</th><th class="num">Their order</th><th class="num">You'd fill</th></tr></thead>
     <tbody>
     {{range .Legs}}
-      <tr><td class="id">{{.ID}}</td><td class="trader">{{.Owner}}</td><td class="num">{{num .Remaining}} <span class="tick">{{.From}}</span></td><td class="num ok"><b>{{num .Take}}</b></td></tr>
+      <tr><td class="id">{{.ID}}</td><td class="trader">{{template "trader" .Owner}}</td><td class="num">{{num .Remaining}} <span class="tick">{{.From}}</span></td><td class="num ok"><b>{{num .Take}}</b></td></tr>
     {{end}}
     </tbody>
   </table>

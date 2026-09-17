@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,7 +30,11 @@ func newTestStore(t *testing.T) *Store {
 
 func newUser(t *testing.T, s *Store, name string) *User {
 	t.Helper()
-	u, err := s.UpsertUser(context.Background(), "id-"+name, name, "", true)
+	code := strings.ToUpper(name)
+	if len(code) > 4 {
+		code = code[:4]
+	}
+	u, err := s.LinkUser(context.Background(), "id-"+name, name, "", Company{Code: code, UserName: strings.ToUpper(name)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +79,7 @@ func TestFullMatch(t *testing.T) {
 		t.Fatalf("expected one order with 40 left, got %+v", open)
 	}
 	trades, _ := s.Trades(ctx, bob.ID, false, 10)
-	if len(trades) != 2 || trades[0].Send != "NCC" || trades[0].Receive != "AIC" || trades[0].Counterparty != "alice" {
+	if len(trades) != 2 || trades[0].Send != "NCC" || trades[0].Receive != "AIC" || trades[0].Counterparty.Handle != "alice" {
 		t.Fatalf("unexpected trades for bob: %+v", trades)
 	}
 	pending, _ := s.PendingNotifications(ctx, 10)
@@ -98,7 +103,7 @@ func TestPartialMatchPostsRemainder(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 	o, _ := s.OrderByID(ctx, 1)
-	if o.Status != "filled" || len(o.Fills) != 1 || o.Fills[0].Filler != "bob" {
+	if o.Status != "filled" || len(o.Fills) != 1 || o.Fills[0].Filler.Handle != "bob" {
 		t.Fatalf("alice's order should be filled by bob: %+v", o)
 	}
 }
@@ -160,7 +165,7 @@ func TestContFlow(t *testing.T) {
 				return tr.Cont
 			}
 		}
-		t.Fatalf("fill 1 not in %s's trades", u.Username)
+		t.Fatalf("fill 1 not in %s's trades", u.Handle)
 		return ""
 	}
 	act := func(u *User, a ContAction) error {
@@ -290,6 +295,10 @@ func TestMigrateSettledTrades(t *testing.T) {
 		`ALTER TABLE fills RENAME COLUMN owner_fulfilled_at TO owner_settled_at`,
 		`ALTER TABLE fills RENAME COLUMN filler_fulfilled_at TO filler_settled_at`,
 		`UPDATE fills SET owner_settled_at = 123`,
+		`DROP INDEX users_company`,
+		`ALTER TABLE users DROP COLUMN company_code`,
+		`ALTER TABLE users DROP COLUMN company_user_name`,
+		`ALTER TABLE users DROP COLUMN corp_code`,
 		`PRAGMA user_version = 1`,
 	} {
 		if _, err := db.Exec(q); err != nil {
@@ -386,7 +395,7 @@ func TestConcurrentFillsNeverOverfill(t *testing.T) {
 	const workers = 20
 	fillers := make([]*User, workers)
 	for i := range fillers {
-		fillers[i] = newUser(t, s, "filler"+string(rune('a'+i)))
+		fillers[i] = newUser(t, s, "f"+string(rune('a'+i)))
 	}
 	var filled atomic.Int64
 	var wg sync.WaitGroup
@@ -429,13 +438,21 @@ func TestLinkStateAndUnreachableUser(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	// Signing in doesn't link, /link does, signing in again keeps it.
-	u, _ := s.UpsertUser(ctx, "123", "dave", "", false)
-	if u.Linked {
+	u, _ := s.UpsertUser(ctx, "123", "dave", "")
+	if u.Linked || u.Ready() {
 		t.Fatal("new sign-in should not be linked")
 	}
-	s.UpsertUser(ctx, "123", "dave", "", true)
-	if u, _ = s.UpsertUser(ctx, "123", "dave2", "", false); !u.Linked || u.Username != "dave2" {
+	nd := Company{Code: "NDC", UserName: "Dave", CorpCode: "NE"}
+	s.LinkUser(ctx, "123", "dave", "", nd)
+	if u, _ = s.UpsertUser(ctx, "123", "dave2", ""); !u.Ready() || u.Handle != "dave2" || u.Name() != "[NE] Dave | NDC" {
 		t.Fatalf("link lost on re-login: %+v", u)
+	}
+	// A company belongs to one Discord account.
+	if _, err := s.LinkUser(ctx, "999", "mallory", "", nd); err != ErrCompanyTaken {
+		t.Fatalf("second account claiming a company: %v", err)
+	}
+	if u, _ := s.LinkUser(ctx, "123", "dave2", "", Company{Code: "NDC", UserName: "Dave"}); u.Name() != "Dave | NDC" {
+		t.Fatalf("relinking the same company, having left the corp: %q", u.Name())
 	}
 
 	bob := newUser(t, s, "bob")
@@ -458,13 +475,130 @@ func TestLinkStateAndUnreachableUser(t *testing.T) {
 	}
 }
 
+func TestTraderName(t *testing.T) {
+	for _, c := range []struct {
+		tr   Trader
+		want string
+	}{
+		{Trader{Handle: "nik", CompanyUser: "Nikuno", CompanyCode: "NIKU", CorpCode: "NE"}, "[NE] Nikuno | NIKU"},
+		{Trader{Handle: "nik", CompanyUser: "Nikuno", CompanyCode: "NIKU"}, "Nikuno | NIKU"},
+		{Trader{Handle: "nik"}, "nik"},
+	} {
+		if got := c.tr.Name(); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.tr, got, c.want)
+		}
+	}
+}
+
+func TestCompanyMigrationGatesLinkedUsers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	s := newTestStoreAt(t, path)
+	s.UpsertUser(context.Background(), "1", "linked", "")
+	s.UpsertUser(context.Background(), "2", "notlinked", "")
+	s.Close()
+	db, _ := sql.Open("sqlite", "file:"+path)
+	for _, q := range []string{
+		`DROP INDEX users_company`,
+		`ALTER TABLE users DROP COLUMN company_code`,
+		`ALTER TABLE users DROP COLUMN company_user_name`,
+		`ALTER TABLE users DROP COLUMN corp_code`,
+		`UPDATE users SET linked_at = 1 WHERE discord_id = '1'`,
+		`PRAGMA user_version = 2`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+
+	s = newTestStoreAt(t, path)
+	if pending, _ := s.PendingNotifications(context.Background(), 10); len(pending) != 0 {
+		t.Fatalf("migration shouldn't DM anyone: %+v", pending)
+	}
+	u, _ := s.UpsertUser(context.Background(), "1", "linked", "")
+	if !u.Linked || u.Ready() {
+		t.Fatalf("linked user without company should be gated: %+v", u)
+	}
+}
+
+func TestFNARCompany(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/company/code/NIKU":
+			w.Write([]byte(`{"UserName":"Nikuno","CompanyCode":"NIKU","CompanyId":"x","CorporationCode":"NE"}`))
+		case "/company/code/SOLO":
+			w.Write([]byte(`{"UserName":"Solo","CompanyCode":"SOLO","CorporationCode":null}`))
+		case "/company/code/BOOM":
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	f := NewFNAR(srv.URL)
+	ctx := context.Background()
+	if c, err := f.Company(ctx, "NIKU"); err != nil || c != (Company{Code: "NIKU", UserName: "Nikuno", CorpCode: "NE"}) {
+		t.Fatalf("NIKU: %+v %v", c, err)
+	}
+	if c, err := f.Company(ctx, "SOLO"); err != nil || c.CorpCode != "" {
+		t.Fatalf("SOLO: %+v %v", c, err)
+	}
+	if _, err := f.Company(ctx, "NOPE"); err != ErrNoCompany {
+		t.Fatalf("unknown: %v", err)
+	}
+	if _, err := f.Company(ctx, "BOOM"); err == nil || err == ErrNoCompany {
+		t.Fatalf("server error should be a plain error: %v", err)
+	}
+	for in, want := range map[string]string{"niku": "NIKU", " ab1 ": "AB1", "TOOLONG": "", "a-b": "", "": ""} {
+		if got := NormalizeCompanyCode(in); got != want {
+			t.Errorf("NormalizeCompanyCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestInteractions(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	s := newTestStore(t)
-	bot, err := NewBot("app", "", hex.EncodeToString(pub), s)
+
+	// One fake server plays both FNAR and Discord's webhook API.
+	type edit struct {
+		Content    string
+		Components []struct {
+			Components []struct {
+				Label    string `json:"label"`
+				CustomID string `json:"custom_id"`
+			} `json:"components"`
+		}
+	}
+	var mu sync.Mutex
+	var edits []edit
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/company/code/NIKU":
+			w.Write([]byte(`{"UserName":"Nikuno","CompanyCode":"NIKU","CompanyName":"Nikuno Corp","CorporationCode":"NE","CorporationName":"Nikuno Enterprises"}`))
+		case r.URL.Path == "/company/code/SOLO":
+			w.Write([]byte(`{"UserName":"Solo","CompanyCode":"SOLO","CompanyName":"Solo Inc","CorporationCode":null}`))
+		case strings.HasPrefix(r.URL.Path, "/company/code/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPatch && r.URL.Path == "/webhooks/app/tok/messages/@original":
+			var e edit
+			json.NewDecoder(r.Body).Decode(&e)
+			mu.Lock()
+			edits = append(edits, e)
+			mu.Unlock()
+			w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer fake.Close()
+	bot, err := NewBot("app", "", hex.EncodeToString(pub), s, NewFNAR(fake.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
+	bot.api = fake.URL
+
 	send := func(body string, sign bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/discord/interactions", bytes.NewBufferString(body))
 		ts := "1700000000"
@@ -476,7 +610,45 @@ func TestInteractions(t *testing.T) {
 		req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(ed25519.Sign(key, []byte(ts+body))))
 		rec := httptest.NewRecorder()
 		bot.HandleInteraction(rec, req)
+		bot.async.Wait()
 		return rec
+	}
+	const erin = `"user":{"id":"555","username":"erin","global_name":"Erin"}`
+	lastEdit := func() edit {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(edits) == 0 {
+			t.Fatal("no deferred reply")
+		}
+		return edits[len(edits)-1]
+	}
+	link := func(code string) edit {
+		t.Helper()
+		rec := send(`{"type":2,"token":"tok","application_id":"app","data":{"name":"link","options":[{"name":"company_code","type":3,"value":"`+code+`"}]},`+erin+`}`, true)
+		if rec.Code != 200 {
+			t.Fatalf("link %s: %d %s", code, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), `"type":4`) {
+			return edit{Content: rec.Body.String()} // answered right away
+		}
+		if !strings.Contains(rec.Body.String(), `"type":5`) {
+			t.Fatalf("link %s should be deferred: %s", code, rec.Body)
+		}
+		return lastEdit()
+	}
+	press := func(customID string) (*httptest.ResponseRecorder, edit) {
+		t.Helper()
+		rec := send(`{"type":3,"token":"tok","application_id":"app","data":{"custom_id":"`+customID+`","component_type":2},`+erin+`}`, true)
+		if strings.Contains(rec.Body.String(), `"type":6`) {
+			return rec, lastEdit()
+		}
+		return rec, edit{}
+	}
+	linked := func() *User {
+		t.Helper()
+		u, _ := s.UpsertUser(context.Background(), "555", "erin", "")
+		return u
 	}
 
 	if rec := send(`{"type":1}`, false); rec.Code != http.StatusUnauthorized {
@@ -485,16 +657,56 @@ func TestInteractions(t *testing.T) {
 	if rec := send(`{"type":1}`, true); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"type":1}` {
 		t.Fatalf("ping: %d %s", rec.Code, rec.Body)
 	}
-	rec := send(`{"type":2,"data":{"name":"link"},"user":{"id":"555","username":"erin","global_name":"Erin"}}`, true)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Linked") {
-		t.Fatalf("link: %d %s", rec.Code, rec.Body)
+
+	if e := link("toolong"); !strings.Contains(e.Content, "company code") {
+		t.Fatalf("invalid code: %s", e.Content)
 	}
-	u, _ := s.UpsertUser(context.Background(), "555", "Erin", "", false)
-	if !u.Linked {
-		t.Fatal("user should be linked after /link")
+	if e := link("ZZZZ"); !strings.Contains(e.Content, "Couldn't find a company") || len(e.Components) != 0 {
+		t.Fatalf("unknown company: %+v", e)
 	}
-	send(`{"type":2,"data":{"name":"unlink"},"user":{"id":"555","username":"erin"}}`, true)
-	if u, _ = s.UserByID(context.Background(), u.ID); u.Linked {
+
+	// Step 1 asks for confirmation and links nothing yet.
+	e := link("niku")
+	if e.Content != "You are **Nikuno** and own **Nikuno Corp** (`NIKU`), a part of **Nikuno Enterprises** (`NE`). Is this correct?" {
+		t.Fatalf("confirm message: %q", e.Content)
+	}
+	if len(e.Components) != 1 || len(e.Components[0].Components) != 2 ||
+		e.Components[0].Components[0].CustomID != "link:yes:NIKU" || e.Components[0].Components[1].CustomID != "link:no" {
+		t.Fatalf("confirm buttons: %+v", e.Components)
+	}
+	if linked().Linked {
+		t.Fatal("shouldn't link before confirming")
+	}
+	if e := link("solo"); e.Content != "You are **Solo** and own **Solo Inc** (`SOLO`). Is this correct?" {
+		t.Fatalf("confirm without corp: %q", e.Content)
+	}
+
+	// No: nothing linked, buttons removed.
+	if rec, _ := press("link:no"); !strings.Contains(rec.Body.String(), `"type":7`) ||
+		!strings.Contains(rec.Body.String(), "nothing was linked") || !strings.Contains(rec.Body.String(), `"components":[]`) {
+		t.Fatalf("no: %s", rec.Body)
+	}
+	if linked().Linked {
+		t.Fatal("No shouldn't link")
+	}
+
+	// Yes: linked, buttons removed.
+	_, e = press("link:yes:NIKU")
+	if !strings.Contains(e.Content, "Linked") || !strings.Contains(e.Content, "[NE] Nikuno | NIKU") || e.Components == nil || len(e.Components) != 0 {
+		t.Fatalf("yes: %+v", e)
+	}
+	if u := linked(); !u.Ready() || u.Handle != "erin" || u.CompanyCode != "NIKU" {
+		t.Fatalf("user should be linked with company after Yes: %+v", u)
+	}
+
+	// Someone else can't get to the confirm step for a taken company.
+	s.LinkUser(context.Background(), "777", "other", "", Company{Code: "SOLO", UserName: "Solo"})
+	if e := link("solo"); !strings.Contains(e.Content, "already linked") || len(e.Components) != 0 {
+		t.Fatalf("taken company: %+v", e)
+	}
+
+	send(`{"type":2,"data":{"name":"unlink"},`+erin+`}`, true)
+	if linked().Linked {
 		t.Fatal("user should be unlinked after /unlink")
 	}
 }

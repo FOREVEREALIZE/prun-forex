@@ -16,22 +16,26 @@ type apiOrder struct {
 	Remaining int64     `json:"remaining"`
 	Filled    int64     `json:"filled"`
 	Status    string    `json:"status"`
-	Owner     string    `json:"owner"`
+	Owner     string    `json:"owner"`         // "[CORP] User | CODE"
+	OwnerCode string    `json:"owner_company"` // company code
+	OwnerTag  string    `json:"owner_discord"` // Discord username
 	CreatedAt time.Time `json:"created_at"`
 	Fills     []apiFill `json:"fills,omitempty"`
 }
 
 type apiFill struct {
-	Amount    int64     `json:"amount"`
-	Filler    string    `json:"filler"`
-	CreatedAt time.Time `json:"created_at"`
+	Amount     int64     `json:"amount"`
+	Filler     string    `json:"filler"`
+	FillerCode string    `json:"filler_company"`
+	FillerTag  string    `json:"filler_discord"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func toAPIOrder(o Order) apiOrder {
 	a := apiOrder{ID: o.ID, From: o.From, To: o.To, Amount: o.Amount, Remaining: o.Remaining,
-		Filled: o.Filled(), Status: o.Status, Owner: o.Owner, CreatedAt: o.CreatedAt.UTC()}
+		Filled: o.Filled(), Status: o.Status, Owner: o.Owner.Name(), OwnerCode: o.Owner.CompanyCode, OwnerTag: o.Owner.Handle, CreatedAt: o.CreatedAt.UTC()}
 	for _, f := range o.Fills {
-		a.Fills = append(a.Fills, apiFill{Amount: f.Amount, Filler: f.Filler, CreatedAt: f.CreatedAt.UTC()})
+		a.Fills = append(a.Fills, apiFill{Amount: f.Amount, Filler: f.Filler.Name(), FillerCode: f.Filler.CompanyCode, FillerTag: f.Filler.Handle, CreatedAt: f.CreatedAt.UTC()})
 	}
 	return a
 }

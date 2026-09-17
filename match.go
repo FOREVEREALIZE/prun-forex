@@ -101,8 +101,8 @@ func (s *Store) PlaceOrder(ctx context.Context, user *User, from, to string, amo
 		o, err := scanOrder(tx.QueryRowContext(ctx, `
 			UPDATE orders SET amount = amount + ?1, remaining = remaining + ?1
 			WHERE id = ?2 AND user_id = ?3 AND status = 'open' AND from_cur = ?4 AND to_cur = ?5
-			RETURNING id, user_id, ?6, from_cur, to_cur, amount, remaining, status, created_at`,
-			left, intoID, user.ID, from, to, user.Username))
+			RETURNING id, user_id, from_cur, to_cur, amount, remaining, status, created_at, ?6, ?7, ?8, ?9`,
+			left, intoID, user.ID, from, to, user.Handle, user.CompanyUser, user.CompanyCode, user.CorpCode))
 		if errors.Is(err, sql.ErrNoRows) {
 			return res, userError(fmt.Sprintf("Order #%d is no longer open, so nothing was added to it.", intoID))
 		}
@@ -119,7 +119,7 @@ func (s *Store) PlaceOrder(ctx context.Context, user *User, from, to string, amo
 		if err != nil {
 			return res, err
 		}
-		res.Order = &Order{ID: id, UserID: user.ID, Owner: user.Username, From: from, To: to,
+		res.Order = &Order{ID: id, UserID: user.ID, Owner: user.Trader, From: from, To: to,
 			Amount: left, Remaining: left, Status: "open", CreatedAt: now}
 	}
 	return res, tx.Commit()
@@ -192,7 +192,7 @@ func queueDM(ctx context.Context, tx *sql.Tx, userID int64, msg string) error {
 
 func (s *Store) fillMessage(o Order, filler *User, n int64) string {
 	left := o.Remaining - n
-	head := fmt.Sprintf("**%s** filled **%d** of your **%s → %s** order `#%d`", filler.Username, n, o.From, o.To, o.ID)
+	head := fmt.Sprintf("**%s** filled **%d** of your **%s → %s** order `#%d`", filler.Name(), n, o.From, o.To, o.ID)
 	if left == 0 {
 		head += " and it's now **fully filled** ✅"
 	} else {

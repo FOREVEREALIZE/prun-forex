@@ -28,6 +28,7 @@ type Config struct {
 	PublicKey  string
 	BotToken   string
 	InviteURL  string
+	FNARURL    string
 	SessionKey []byte
 	DevLogin   bool
 }
@@ -47,6 +48,7 @@ func loadConfig() Config {
 		PublicKey: os.Getenv("DISCORD_PUBLIC_KEY"),
 		BotToken:  os.Getenv("DISCORD_BOT_TOKEN"),
 		InviteURL: os.Getenv("DISCORD_INVITE_URL"),
+		FNARURL:   env("FNAR_URL", "https://rest.fnar.net"),
 		DevLogin:  os.Getenv("DEV_LOGIN") == "1",
 	}
 	if k := os.Getenv("SESSION_KEY"); len(k) >= 32 {
@@ -73,7 +75,7 @@ func main() {
 	}
 	defer store.Close()
 
-	bot, err := NewBot(cfg.AppID, cfg.BotToken, cfg.PublicKey, store)
+	bot, err := NewBot(cfg.AppID, cfg.BotToken, cfg.PublicKey, store, NewFNAR(cfg.FNARURL))
 	if err != nil {
 		log.Fatal(err)
 	}

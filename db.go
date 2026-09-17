@@ -81,6 +81,8 @@ const (
 	ErrOwnOrder = userError("That's your own order.")
 	ErrTooMuch  = userError("That order no longer has that much remaining.")
 	ErrClosed   = userError("That order is no longer open.")
+
+	ErrCompanyTaken = userError("That company is already linked to another Discord account.")
 )
 
 type Store struct {
@@ -127,6 +129,13 @@ var migrations = []string{
 	 ALTER TABLE fills ADD COLUMN cont_request_from INTEGER REFERENCES users(id);
 	 ALTER TABLE fills ADD COLUMN cont_sent_at INTEGER;
 	 UPDATE fills SET cont_sent_at = COALESCE(owner_fulfilled_at, filler_fulfilled_at);`,
+	// In-game identity from FNAR, set by /link. username becomes the Discord
+	// handle rather than the display name. Linked users without a company are
+	// sent back through onboarding on the site.
+	`ALTER TABLE users ADD COLUMN company_code TEXT;
+	 ALTER TABLE users ADD COLUMN company_user_name TEXT;
+	 ALTER TABLE users ADD COLUMN corp_code TEXT;
+	 CREATE UNIQUE INDEX users_company ON users(company_code) WHERE company_code IS NOT NULL;`,
 }
 
 func migrate(db *sql.DB) error {
@@ -159,9 +168,60 @@ func (s *Store) Close() error { return s.db.Close() }
 type User struct {
 	ID        int64
 	DiscordID string
-	Username  string
 	Avatar    string
-	Linked    bool
+	Linked    bool // has run /link, so the bot can DM them
+	Trader
+}
+
+// Ready means the user can trade: linked, with a company set by /link.
+func (u *User) Ready() bool { return u.Linked && u.CompanyCode != "" }
+
+// Trader is how a user shows up to others: their in-game company, plus their
+// Discord handle.
+type Trader struct {
+	Handle      string // Discord username, not display name
+	CompanyUser string // in-game username
+	CompanyCode string
+	CorpCode    string
+}
+
+// Name is "[CORP] User | CODE", or the Discord handle if there's no company.
+func (t Trader) Name() string {
+	if t.CompanyCode == "" {
+		return t.Handle
+	}
+	name := t.CompanyUser + " | " + t.CompanyCode
+	if t.CorpCode != "" {
+		name = "[" + t.CorpCode + "] " + name
+	}
+	return name
+}
+
+// Short is the company code, for tight spots.
+func (t Trader) Short() string {
+	if t.CompanyCode == "" {
+		return t.Handle
+	}
+	return t.CompanyCode
+}
+
+func (t Trader) String() string { return t.Name() }
+
+// traderCols selects a Trader from the users table aliased as a; scan it with dest.
+func traderCols(a string) string {
+	return a + ".username, COALESCE(" + a + ".company_user_name, ''), COALESCE(" + a + ".company_code, ''), COALESCE(" + a + ".corp_code, '')"
+}
+
+func (t *Trader) dest() []any { return []any{&t.Handle, &t.CompanyUser, &t.CompanyCode, &t.CorpCode} }
+
+// Company is a Prosperous Universe company as FNAR reports it. Only Code,
+// UserName and CorpCode are stored.
+type Company struct {
+	Code     string
+	Name     string
+	UserName string
+	CorpCode string // empty if not in a corporation
+	CorpName string
 }
 
 func (u *User) AvatarURL() string {
@@ -174,7 +234,7 @@ func (u *User) AvatarURL() string {
 type Order struct {
 	ID        int64
 	UserID    int64
-	Owner     string
+	Owner     Trader
 	From      string
 	To        string
 	Amount    int64
@@ -190,32 +250,53 @@ func (o Order) Pct() int64    { return o.Filled() * 100 / o.Amount }
 type Fill struct {
 	ID        int64
 	OrderID   int64
-	Filler    string
+	Filler    Trader
 	Amount    int64
 	CreatedAt time.Time
 }
 
-// UpsertUser creates or refreshes a user by Discord ID. With link=true it also
-// marks them linked; otherwise the existing link state is kept.
-func (s *Store) UpsertUser(ctx context.Context, discordID, username, avatar string, link bool) (*User, error) {
-	now := time.Now().Unix()
-	var linkedAt any
-	if link {
-		linkedAt = now
-	}
-	u := &User{DiscordID: discordID, Username: username, Avatar: avatar}
+// UpsertUser creates or refreshes a user by Discord ID on sign-in, keeping
+// their link state and company.
+func (s *Store) UpsertUser(ctx context.Context, discordID, handle, avatar string) (*User, error) {
+	var id int64
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO users (discord_id, username, avatar, linked_at, created_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (discord_id) DO UPDATE SET
-			username = excluded.username,
-			avatar = excluded.avatar,
-			linked_at = COALESCE(excluded.linked_at, users.linked_at)
-		RETURNING id, linked_at IS NOT NULL`,
-		discordID, username, avatar, linkedAt, now).Scan(&u.ID, &u.Linked)
+		INSERT INTO users (discord_id, username, avatar, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (discord_id) DO UPDATE SET username = excluded.username, avatar = excluded.avatar
+		RETURNING id`,
+		discordID, handle, avatar, time.Now().Unix()).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	return u, nil
+	return s.UserByID(ctx, id)
+}
+
+// LinkUser marks a user linked (from /link) with their in-game company. A
+// company can only belong to one Discord account.
+func (s *Store) LinkUser(ctx context.Context, discordID, handle, avatar string, c Company) (*User, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO users (discord_id, username, avatar, linked_at, company_code, company_user_name, corp_code, created_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?4)
+		ON CONFLICT (discord_id) DO UPDATE SET
+			username = excluded.username, avatar = excluded.avatar, linked_at = excluded.linked_at,
+			company_code = excluded.company_code, company_user_name = excluded.company_user_name, corp_code = excluded.corp_code
+		RETURNING id`,
+		discordID, handle, avatar, time.Now().Unix(), c.Code, c.UserName, c.CorpCode).Scan(&id)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: users.company_code") {
+			return nil, ErrCompanyTaken
+		}
+		return nil, err
+	}
+	return s.UserByID(ctx, id)
+}
+
+// CompanyTaken reports whether another Discord account has linked the company.
+func (s *Store) CompanyTaken(ctx context.Context, code, discordID string) (bool, error) {
+	var taken bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM users WHERE company_code = ? AND discord_id != ?)`, code, discordID).Scan(&taken)
+	return taken, err
 }
 
 func (s *Store) Unlink(ctx context.Context, discordID string) error {
@@ -226,8 +307,8 @@ func (s *Store) Unlink(ctx context.Context, discordID string) error {
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	u := &User{ID: id}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT discord_id, username, avatar, linked_at IS NOT NULL FROM users WHERE id = ?`, id).
-		Scan(&u.DiscordID, &u.Username, &u.Avatar, &u.Linked)
+		`SELECT u.discord_id, u.avatar, u.linked_at IS NOT NULL, `+traderCols("u")+` FROM users u WHERE u.id = ?`, id).
+		Scan(append([]any{&u.DiscordID, &u.Avatar, &u.Linked}, u.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -242,14 +323,14 @@ type OrderFilter struct {
 	Limit         int
 }
 
-const orderCols = `o.id, o.user_id, u.username, o.from_cur, o.to_cur, o.amount, o.remaining, o.status, o.created_at`
+var orderCols = `o.id, o.user_id, o.from_cur, o.to_cur, o.amount, o.remaining, o.status, o.created_at, ` + traderCols("u")
 
 type scanner interface{ Scan(...any) error }
 
 func scanOrder(r scanner) (Order, error) {
 	var o Order
 	var created int64
-	err := r.Scan(&o.ID, &o.UserID, &o.Owner, &o.From, &o.To, &o.Amount, &o.Remaining, &o.Status, &created)
+	err := r.Scan(append([]any{&o.ID, &o.UserID, &o.From, &o.To, &o.Amount, &o.Remaining, &o.Status, &created}, o.Owner.dest()...)...)
 	o.CreatedAt = time.Unix(created, 0)
 	return o, err
 }
@@ -327,7 +408,7 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (*Order, error) {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.id, f.order_id, u.username, f.amount, f.created_at
+		SELECT f.id, f.order_id, f.amount, f.created_at, `+traderCols("u")+`
 		FROM fills f JOIN users u ON u.id = f.filler_id
 		WHERE f.order_id = ? ORDER BY f.created_at, f.id`, id)
 	if err != nil {
@@ -337,7 +418,7 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (*Order, error) {
 	for rows.Next() {
 		var f Fill
 		var created int64
-		if err := rows.Scan(&f.ID, &f.OrderID, &f.Filler, &f.Amount, &created); err != nil {
+		if err := rows.Scan(append([]any{&f.ID, &f.OrderID, &f.Amount, &created}, f.Filler.dest()...)...); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = time.Unix(created, 0)

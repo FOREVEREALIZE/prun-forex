@@ -47,7 +47,7 @@ var (
 type Trade struct {
 	FillID        int64
 	OrderID       int64
-	Counterparty  string
+	Counterparty  Trader
 	Amount        int64
 	Send          string
 	Receive       string
@@ -81,7 +81,7 @@ func contState(me, other int64, contractor, requestFrom sql.NullInt64, sent bool
 // Ones the user has marked fulfilled are left out unless includeFulfilled.
 func (s *Store) Trades(ctx context.Context, userID int64, includeFulfilled bool, limit int) ([]Trade, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.id, o.id, o.user_id, f.filler_id, owner.username, filler.username, o.from_cur, o.to_cur,
+		SELECT f.id, o.id, o.user_id, f.filler_id, `+traderCols("owner")+`, `+traderCols("filler")+`, o.from_cur, o.to_cur,
 			f.amount, f.created_at, f.contractor_id, f.cont_request_from, f.cont_sent_at IS NOT NULL,
 			f.owner_fulfilled_at IS NOT NULL, f.filler_fulfilled_at IS NOT NULL,
 			CASE WHEN o.user_id = ?1 THEN f.owner_fulfilled_at ELSE f.filler_fulfilled_at END IS NOT NULL AS mine_fulfilled
@@ -100,12 +100,16 @@ func (s *Store) Trades(ctx context.Context, userID int64, includeFulfilled bool,
 	for rows.Next() {
 		var t Trade
 		var ownerID, fillerID, created int64
-		var owner, filler, from, to string
+		var owner, filler Trader
+		var from, to string
 		var contractor, requestFrom sql.NullInt64
 		var sent, ownerFulfilled, fillerFulfilled, mineFulfilled bool
-		if err := rows.Scan(&t.FillID, &t.OrderID, &ownerID, &fillerID, &owner, &filler, &from, &to,
-			&t.Amount, &created, &contractor, &requestFrom, &sent,
-			&ownerFulfilled, &fillerFulfilled, &mineFulfilled); err != nil {
+		dest := []any{&t.FillID, &t.OrderID, &ownerID, &fillerID}
+		dest = append(dest, owner.dest()...)
+		dest = append(dest, filler.dest()...)
+		dest = append(dest, &from, &to, &t.Amount, &created, &contractor, &requestFrom, &sent,
+			&ownerFulfilled, &fillerFulfilled, &mineFulfilled)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		t.CreatedAt = time.Unix(created, 0)
@@ -136,44 +140,46 @@ func (s *Store) FulfilledCount(ctx context.Context, userID int64) (int, error) {
 }
 
 // ContAct applies a CONT action to a fill on behalf of user, DMing the other
-// side where it concerns them. It returns the other side's name.
-func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action ContAction) (string, error) {
+// side where it concerns them. It returns the other side.
+func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action ContAction) (Trader, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return Trader{}, err
 	}
 	defer tx.Rollback()
 
 	var orderID, ownerID, fillerID, amount int64
-	var from, to, ownerName, fillerName string
+	var from, to string
+	var ownerT, fillerT Trader
 	var contractor, requestFrom, sentAt sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-		SELECT o.id, o.user_id, f.filler_id, f.amount, o.from_cur, o.to_cur, owner.username, filler.username,
+		SELECT o.id, o.user_id, f.filler_id, f.amount, o.from_cur, o.to_cur, `+traderCols("owner")+`, `+traderCols("filler")+`,
 			f.contractor_id, f.cont_request_from, f.cont_sent_at
 		FROM fills f
 		JOIN orders o ON o.id = f.order_id
 		JOIN users owner ON owner.id = o.user_id
 		JOIN users filler ON filler.id = f.filler_id
 		WHERE f.id = ?`, fillID).
-		Scan(&orderID, &ownerID, &fillerID, &amount, &from, &to, &ownerName, &fillerName, &contractor, &requestFrom, &sentAt)
+		Scan(append(append(append([]any{&orderID, &ownerID, &fillerID, &amount, &from, &to}, ownerT.dest()...), fillerT.dest()...),
+			&contractor, &requestFrom, &sentAt)...)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", errTradeNotFound
+		return Trader{}, errTradeNotFound
 	}
 	if err != nil {
-		return "", err
+		return Trader{}, err
 	}
 
 	me := user.ID
 	isOwner := me == ownerID
 	if !isOwner && me != fillerID {
-		return "", errTradeNotFound
+		return Trader{}, errTradeNotFound
 	}
-	otherID, other := fillerID, fillerName
+	otherID, other := fillerID, fillerT
 	// What the other side sends and receives: the owner offered `from`.
 	theySend, theyGet := to, from
 	fulfilledCol := "owner_fulfilled_at"
 	if !isOwner {
-		otherID, other = ownerID, ownerName
+		otherID, other = ownerID, ownerT
 		theySend, theyGet = from, to
 		fulfilledCol = "filler_fulfilled_at"
 	}
@@ -188,42 +194,42 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 	switch action {
 	case ActSendMyself:
 		if contractor.Valid || sentAt.Valid {
-			return "", errTradeChanged
+			return Trader{}, errTradeChanged
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE fills SET contractor_id = ?, cont_request_from = NULL WHERE id = ?`, me, fillID); err != nil {
-			return "", err
+			return Trader{}, err
 		}
 		if requestedByOther {
-			dm = fmt.Sprintf("**%s** accepted: they'll send the CONT for %s. I'll DM you once it's sent.", user.Username, trade)
+			dm = fmt.Sprintf("**%s** accepted: they'll send the CONT for %s. I'll DM you once it's sent.", user.Name(), trade)
 		} else {
-			dm = fmt.Sprintf("**%s** will send the CONT for %s. I'll DM you once it's sent.", user.Username, trade)
+			dm = fmt.Sprintf("**%s** will send the CONT for %s. I'll DM you once it's sent.", user.Name(), trade)
 		}
 
 	case ActRequest:
 		if contractor.Valid || sentAt.Valid || (requestFrom.Valid && requestFrom.Int64 == me) {
-			return "", errTradeChanged
+			return Trader{}, errTradeChanged
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE fills SET cont_request_from = ? WHERE id = ?`, me, fillID); err != nil {
-			return "", err
+			return Trader{}, err
 		}
 		if requestedByOther {
-			dm = fmt.Sprintf("**%s** asked you to send the CONT instead, for %s. Accept or ask them again:", user.Username, trade)
+			dm = fmt.Sprintf("**%s** asked you to send the CONT instead, for %s. Accept or ask them again:", user.Name(), trade)
 		} else {
-			dm = fmt.Sprintf("**%s** asks you to send the CONT for %s. Accept or ask them instead:", user.Username, trade)
+			dm = fmt.Sprintf("**%s** asks you to send the CONT for %s. Accept or ask them instead:", user.Name(), trade)
 		}
 
 	case ActMarkSent:
 		if !contractor.Valid || contractor.Int64 != me || sentAt.Valid {
-			return "", errTradeChanged
+			return Trader{}, errTradeChanged
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE fills SET cont_sent_at = ? WHERE id = ?`, time.Now().Unix(), fillID); err != nil {
-			return "", err
+			return Trader{}, err
 		}
-		dm = fmt.Sprintf("**%s** sent the CONT for %s. Accept it in-game, then mark the trade fulfilled.", user.Username, trade)
+		dm = fmt.Sprintf("**%s** sent the CONT for %s. Accept it in-game, then mark the trade fulfilled.", user.Name(), trade)
 
 	case ActFulfill, ActUnfulfill:
 		if !sentAt.Valid {
-			return "", userError("The CONT hasn't been sent yet.")
+			return Trader{}, userError("The CONT hasn't been sent yet.")
 		}
 		var at any
 		if action == ActFulfill {
@@ -231,16 +237,16 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 		}
 		// fulfilledCol is one of two constants above, never user input.
 		if _, err := tx.ExecContext(ctx, `UPDATE fills SET `+fulfilledCol+` = ? WHERE id = ?`, at, fillID); err != nil {
-			return "", err
+			return Trader{}, err
 		}
 
 	default:
-		return "", userError("Unknown action.")
+		return Trader{}, userError("Unknown action.")
 	}
 
 	if dm != "" {
 		if err := queueDM(ctx, tx, otherID, dm+link); err != nil {
-			return "", err
+			return Trader{}, err
 		}
 	}
 	return other, tx.Commit()

@@ -24,7 +24,7 @@
     {{if .User}}
       <span class="user">
         {{with .User.AvatarURL}}<img src="{{.}}" alt="" width="24" height="24">{{else}}<span class="avatar-fallback" aria-hidden="true"></span>{{end}}
-        <span class="user-name">{{.User.Username}}</span>
+        <span class="user-name">{{.User.Name}}</span>
       </span>
       <button class="btn ghost small" hx-post="/logout" hx-swap="none">Sign out</button>
     {{else}}
@@ -34,7 +34,7 @@
 </header>
 
 <main class="wrap">
-{{if and .User (not .User.Linked)}}
+{{if and .User (not .User.Ready)}}
   {{template "gate" .}}
 {{else}}
   {{if .User}}{{template "order-form" .}}{{else}}{{template "intro" .}}{{end}}
@@ -66,8 +66,30 @@
 
 {{define "gate"}}
 <section class="panel gate" hx-get="/link/status" hx-trigger="every 3s" hx-swap="none">
+{{if .User.Linked}}
+  <span class="label">Link again</span>
+  <h1>Add your company, @{{.User.Handle}}.</h1>
+  <p class="lede">You've linked the bot before, but PrUn Forex now shows traders by their in-game name and company instead of their Discord name, so trades are easier to match up in-game. That needs your company code, which your old link doesn't have.</p>
+  <ol class="steps">
+    <li>
+      <span class="step-n">01</span>
+      <div>
+        <b>Run <code>/link</code> again with your company code</b>
+        <p>In your DM with the bot, type <code>/link company_code:ABCD</code> using your in-game company code.</p>
+        <a class="btn ghost" href="{{.BotDMURL}}" target="_blank" rel="noopener">Open bot profile</a>
+      </div>
+    </li>
+    <li>
+      <span class="step-n">02</span>
+      <div>
+        <b>Confirm it's you</b>
+        <p>The bot shows the company it found. Press <i>Yes</i> if it's yours.</p>
+      </div>
+    </li>
+  </ol>
+{{else}}
   <span class="label">Almost there</span>
-  <h1>Link the Forex bot, {{.User.Username}}.</h1>
+  <h1>Link the Forex bot, @{{.User.Handle}}.</h1>
   <p class="lede">You need to link before you can trade. The bot DMs you when someone fills your orders, but it can only message people who've talked to it first.</p>
   <ol class="steps">
     <li>
@@ -81,8 +103,8 @@
     <li>
       <span class="step-n">02</span>
       <div>
-        <b>DM the bot and run <code>/link</code></b>
-        <p>Open the bot's profile, hit <i>Message</i>, then type <code>/link</code>.</p>
+        <b>DM the bot and run <code>/link</code> with your company code</b>
+        <p>Open the bot's profile, hit <i>Message</i>, then type <code>/link company_code:ABCD</code> using your in-game company code, and press <i>Yes</i> when the bot shows your company. Other traders will see your in-game name.</p>
         <a class="btn ghost" href="{{.BotDMURL}}" target="_blank" rel="noopener">Open bot profile</a>
       </div>
     </li>
@@ -97,6 +119,7 @@
     </li>
     {{end}}
   </ol>
+{{end}}
   <p class="waiting"><span class="pulse" aria-hidden="true"></span><span>Waiting for <code>/link</code>. This page continues on its own.</span></p>
 </section>
 {{end}}

@@ -125,7 +125,7 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "couldn't verify your Discord login", http.StatusUnauthorized)
 		return
 	}
-	u, err := s.store.UpsertUser(r.Context(), du.ID, du.displayName(), du.Avatar, false)
+	u, err := s.store.UpsertUser(r.Context(), du.ID, du.Username, du.Avatar)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -135,17 +135,9 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type discordUser struct {
-	ID         string `json:"id"`
-	Username   string `json:"username"`
-	GlobalName string `json:"global_name"`
-	Avatar     string `json:"avatar"`
-}
-
-func (d discordUser) displayName() string {
-	if d.GlobalName != "" {
-		return d.GlobalName
-	}
-	return d.Username
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Avatar   string `json:"avatar"`
 }
 
 var discordHTTP = &http.Client{Timeout: 10 * time.Second}
@@ -180,14 +172,27 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleDevLogin signs in as a fake, already-linked user. Only with DEV_LOGIN=1.
+// handleDevLogin signs in as a fake user, linked with a made-up company unless
+// &unlinked=1 (add &corp=XX for a corporation). Only with DEV_LOGIN=1.
 func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	q := r.URL.Query()
+	name := strings.TrimSpace(q.Get("name"))
 	if name == "" || len(name) > 32 {
 		http.Error(w, "?name= required", http.StatusBadRequest)
 		return
 	}
-	u, err := s.store.UpsertUser(r.Context(), "dev-"+name, name, "", r.URL.Query().Get("unlinked") == "")
+	var u *User
+	var err error
+	if q.Get("unlinked") != "" {
+		u, err = s.store.UpsertUser(r.Context(), "dev-"+name, name, "")
+	} else {
+		code := strings.ToUpper(name)
+		if len(code) > 4 {
+			code = code[:4]
+		}
+		c := Company{Code: code, UserName: strings.ToUpper(name[:1]) + name[1:], CorpCode: strings.ToUpper(q.Get("corp"))}
+		u, err = s.store.LinkUser(r.Context(), "dev-"+name, name, "", c)
+	}
 	if err != nil {
 		serverError(w, err)
 		return
