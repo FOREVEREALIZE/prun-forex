@@ -1,0 +1,91 @@
+{{define "modal"}}
+<div class="modal-backdrop" data-close></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-head">
+    <span class="label">{{if .Full}}Instant match{{else}}Partial match{{end}}</span>
+    <button class="x" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <h3 id="modal-title">
+    {{if .Full}}Your whole order can be filled right now.{{else}}Part of your order can be filled right now.{{end}}
+  </h3>
+  <p>
+    You're offering <b class="mono">{{num .Amount}} {{.From}}</b> for <b class="mono">{{.To}}</b>.
+    {{if .Full}}
+      Other players already want the opposite trade, enough to cover all of it.
+    {{else}}
+      Other players' orders cover <b class="mono ok">{{num .Available}}</b> of it, leaving <b class="mono">{{num .Leftover}}</b> unfilled.
+    {{end}}
+  </p>
+  <table class="grid mini">
+    <thead><tr><th>#</th><th>Trader</th><th class="num">Their order</th><th class="num">You'd fill</th></tr></thead>
+    <tbody>
+    {{range .Legs}}
+      <tr><td class="id">{{.ID}}</td><td class="trader">{{.Owner}}</td><td class="num">{{num .Remaining}} <span class="tick">{{.From}}</span></td><td class="num ok"><b>{{num .Take}}</b></td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  <form class="modal-actions" hx-post="/orders" hx-target="#modal" hx-disabled-elt="find button">
+    <input type="hidden" name="from" value="{{.From}}">
+    <input type="hidden" name="to" value="{{.To}}">
+    <input type="hidden" name="amount" value="{{.Amount}}">
+    {{with .Into}}<input type="hidden" name="into" value="{{.ID}}">{{end}}
+    <button class="btn ghost" type="submit" name="mode" value="keep">
+      {{if .Into}}Add all {{num .Amount}} to #{{.Into.ID}} anyway{{else}}Post my full order anyway{{end}}
+    </button>
+    <button class="btn primary" type="submit" name="mode" value="take">
+      {{if .Full}}Fill their orders instead{{else}}Fill {{num .Available}} now, {{if .Into}}add {{num .Leftover}} to #{{.Into.ID}}{{else}}post the other {{num .Leftover}}{{end}}{{end}}
+    </button>
+  </form>
+</div>
+{{end}}
+
+{{define "dup-modal"}}
+<div class="modal-backdrop" data-close></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-head">
+    <span class="label">Existing order</span>
+    <button class="x" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <h3 id="modal-title">You already have an open <span class="mono">{{.From}} → {{.To}}</span> order.</h3>
+  {{with .Existing}}
+  <table class="grid mini">
+    <thead><tr><th>#</th><th>Pair</th><th class="num">Open</th><th class="num">Age</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="id">{{.ID}}</td>
+        <td><span class="tick">{{.From}}</span><span class="arrow">→</span><span class="tick alt">{{.To}}</span></td>
+        <td class="num"><b>{{num .Remaining}}</b>{{if ne .Remaining .Amount}}<span class="of">/{{num .Amount}}</span>{{end}}</td>
+        <td class="num muted">{{ago .CreatedAt}}</td>
+      </tr>
+    </tbody>
+  </table>
+  {{end}}
+  <p>Add <b class="mono">{{num .Amount}} {{.From}}</b> to it? It'll have <b class="mono">{{num (add .Existing.Remaining .Amount)}}</b> open and keep its place in line. Or post this as a separate order.</p>
+  <form class="modal-actions" hx-post="/orders/preview" hx-target="#modal" hx-disabled-elt="find button">
+    <input type="hidden" name="from" value="{{.From}}">
+    <input type="hidden" name="to" value="{{.To}}">
+    <input type="hidden" name="amount" value="{{.Amount}}">
+    <button class="btn ghost" type="submit" name="dup" value="new">Post as separate order</button>
+    <button class="btn primary" type="submit" name="dup" value="{{.Existing.ID}}">Add {{num .Amount}} to #{{.Existing.ID}}</button>
+  </form>
+</div>
+{{end}}
+
+{{define "toast"}}<div id="toasts" hx-swap-oob="beforeend"><div class="toast {{.Kind}}" role="status">{{.Msg}}</div></div>{{end}}
+
+{{define "auth"}}<!doctype html>
+<html lang="en">
+<head>
+{{template "head"}}
+<title>Signing in · PrUn Forex</title>
+</head>
+<body class="auth-page">
+<main class="panel auth">
+  <span class="label">Discord</span>
+  <h1 id="auth-msg">Signing you in…</h1>
+  <p id="auth-err" class="err" hidden></p>
+  <a id="auth-back" class="btn ghost" href="/" hidden>Back to PrUn Forex</a>
+</main>
+<script src="/static/auth.js"></script>
+</body>
+</html>{{end}}

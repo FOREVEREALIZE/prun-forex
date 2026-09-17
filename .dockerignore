@@ -1,0 +1,8 @@
+.git
+.github
+.claude
+prun-forex
+*.db
+*.db-*
+compose.yml
+.env

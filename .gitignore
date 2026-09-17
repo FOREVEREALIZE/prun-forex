@@ -1,0 +1,6 @@
+/prun-forex
+*.db
+*.db-wal
+*.db-shm
+.env
+.claude/

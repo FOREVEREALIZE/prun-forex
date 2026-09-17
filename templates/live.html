@@ -1,0 +1,107 @@
+{{define "live"}}
+<div id="live" class="live" hx-get="/fragments/live" hx-trigger="every 60s [liveIdle()], refresh from:body" hx-include="#pair-filter" hx-swap="outerHTML">
+  <section class="panel">
+    <div class="panel-head">
+      <h2 class="label">Open orders <span class="count">{{len .Board}}</span></h2>
+      <div class="tools">
+        <select id="pair-filter" name="pair" aria-label="Filter by pair" hx-get="/fragments/live" hx-target="#live" hx-swap="outerHTML" hx-trigger="change">
+          <option value="">All pairs</option>
+          {{range .Pairs}}<option value="{{.}}"{{if eq . $.Pair}} selected{{end}}>{{pair .}}</option>{{end}}
+        </select>
+        <span class="updated" title="Refreshes every 60 seconds">{{.UpdatedAt.UTC.Format "15:04:05"}} UTC</span>
+      </div>
+    </div>
+    {{if .Board}}
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>#</th><th>Trader</th><th>Offers</th><th>Wants</th><th class="num">Open</th><th class="num">Age</th>{{if .User}}<th class="act"></th>{{end}}</tr></thead>
+        <tbody>
+        {{range .Board}}
+          <tr{{if and $.User (eq .UserID $.User.ID)}} class="mine"{{end}}>
+            <td class="id">{{.ID}}</td>
+            <td class="trader">{{.Owner}}</td>
+            <td><span class="tick">{{.From}}</span></td>
+            <td><span class="tick alt">{{.To}}</span></td>
+            <td class="num">
+              <b>{{num .Remaining}}</b>{{if ne .Remaining .Amount}}<span class="of">/{{num .Amount}}</span>{{end}}
+              <span class="bar" aria-hidden="true"><i style="width:{{.Pct}}%"></i></span>
+            </td>
+            <td class="num muted">{{ago .CreatedAt}}</td>
+            {{if $.User}}
+            <td class="act">
+              {{if eq .UserID $.User.ID}}
+                <span class="yours">yours</span>
+              {{else}}
+                <form class="fill" hx-post="/orders/{{.ID}}/fill" hx-swap="none" hx-disabled-elt="find button">
+                  <input name="amount" type="number" min="1" max="{{.Remaining}}" step="1" inputmode="numeric" placeholder="{{.Remaining}}" aria-label="Amount to fill (default: all)">
+                  <button class="btn primary small" type="submit">Fill</button>
+                </form>
+              {{end}}
+            </td>
+            {{end}}
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+      <p class="empty">No open orders{{if .Pair}} for {{pair .Pair}}{{end}}.</p>
+    {{end}}
+  </section>
+
+  {{if .User}}
+  <div class="split">
+    <section class="panel">
+      <div class="panel-head"><h2 class="label">My orders</h2></div>
+      {{if .MyOrders}}
+      <div class="table-wrap">
+        <table class="grid">
+          <thead><tr><th>#</th><th>Pair</th><th class="num">Filled</th><th>Status</th><th class="act"></th></tr></thead>
+          <tbody>
+          {{range .MyOrders}}
+            <tr class="st-{{.Status}}">
+              <td class="id">{{.ID}}</td>
+              <td><span class="tick">{{.From}}</span><span class="arrow">→</span><span class="tick alt">{{.To}}</span></td>
+              <td class="num">
+                <b>{{num .Filled}}</b><span class="of">/{{num .Amount}}</span>
+                <span class="bar" aria-hidden="true"><i style="width:{{.Pct}}%"></i></span>
+              </td>
+              <td><span class="status {{.Status}}">{{.Status}}</span></td>
+              <td class="act">{{if eq .Status "open"}}<button class="btn danger small" hx-post="/orders/{{.ID}}/cancel" hx-swap="none" hx-confirm="Cancel order #{{.ID}}? Fills so far still stand.">Cancel</button>{{end}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+        <p class="empty">You haven't posted any orders yet.</p>
+      {{end}}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2 class="label">Trades to settle</h2></div>
+      {{if .Trades}}
+      <div class="table-wrap">
+        <table class="grid">
+          <thead><tr><th>Order</th><th>With</th><th class="num">You send</th><th class="num">You get</th><th class="num">When</th></tr></thead>
+          <tbody>
+          {{range .Trades}}
+            <tr>
+              <td class="id">{{.OrderID}}</td>
+              <td class="trader">{{.Counterparty}}</td>
+              <td class="num send">{{num .Amount}} <span class="tick">{{.Send}}</span></td>
+              <td class="num recv">{{num .Amount}} <span class="tick alt">{{.Receive}}</span></td>
+              <td class="num muted">{{ago .CreatedAt}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+        <p class="empty">No trades yet. Your fills show up here with who to pay.</p>
+      {{end}}
+    </section>
+  </div>
+  {{end}}
+</div>
+{{end}}

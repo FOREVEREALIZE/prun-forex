@@ -1,0 +1,124 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+{{end}}
+
+{{define "page"}}<!doctype html>
+<html lang="en">
+<head>
+{{template "head"}}
+<title>PrUn Forex</title>
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>PRUN<b>FOREX</b></a>
+  <div class="who">
+    {{if .User}}
+      <span class="user">
+        {{with .User.AvatarURL}}<img src="{{.}}" alt="" width="24" height="24">{{else}}<span class="avatar-fallback" aria-hidden="true"></span>{{end}}
+        <span class="user-name">{{.User.Username}}</span>
+      </span>
+      <button class="btn ghost small" hx-post="/logout" hx-swap="none">Sign out</button>
+    {{else}}
+      <a class="btn primary small" href="{{.LoginURL}}" data-login>Sign in with Discord</a>
+    {{end}}
+  </div>
+</header>
+
+<main class="wrap">
+{{if and .User (not .User.Linked)}}
+  {{template "gate" .}}
+{{else}}
+  {{if .User}}{{template "order-form" .}}{{else}}{{template "intro" .}}{{end}}
+  {{template "live" .Live}}
+{{end}}
+</main>
+
+<footer class="wrap foot">
+  <span>1:1 swaps · whole units · settle in-game</span>
+  <a href="/api/orders">JSON API</a>
+</footer>
+
+<div id="modal"></div>
+<div id="toasts" aria-live="polite"></div>
+</body>
+</html>{{end}}
+
+{{define "intro"}}
+<section class="hero">
+  <span class="label">Prosperous Universe · currency exchange</span>
+  <h1>Swap <span class="tick">AIC</span> <span class="tick">CIS</span> <span class="tick">ICA</span> <span class="tick">NCC</span> 1:1 with other players.</h1>
+  <p>Post what you have and what you want. Other players fill all or part of it, you settle in-game, and the bot DMs you when it happens.</p>
+  <div class="hero-actions">
+    <a class="btn primary" href="{{.LoginURL}}" data-login>Sign in with Discord</a>
+    {{if .DevLogin}}<span class="dev">dev: <a href="/dev/login?name=alice">alice</a> · <a href="/dev/login?name=bob">bob</a> · <a href="/dev/login?name=carol&unlinked=1">carol (unlinked)</a></span>{{end}}
+  </div>
+</section>
+{{end}}
+
+{{define "gate"}}
+<section class="panel gate" hx-get="/link/status" hx-trigger="every 3s" hx-swap="none">
+  <span class="label">Almost there</span>
+  <h1>Link the Forex bot, {{.User.Username}}.</h1>
+  <p class="lede">You need to link before you can trade. The bot DMs you when someone fills your orders, but it can only message people who've talked to it first.</p>
+  <ol class="steps">
+    <li>
+      <span class="step-n">01</span>
+      <div>
+        <b>Add the app to your Discord account</b>
+        <p>Pick <i>Add to my apps</i> when Discord asks.</p>
+        <a class="btn primary" href="{{.InstallURL}}" target="_blank" rel="noopener">Add to my apps</a>
+      </div>
+    </li>
+    <li>
+      <span class="step-n">02</span>
+      <div>
+        <b>DM the bot and run <code>/link</code></b>
+        <p>Open the bot's profile, hit <i>Message</i>, then type <code>/link</code>.</p>
+        <a class="btn ghost" href="{{.BotDMURL}}" target="_blank" rel="noopener">Open bot profile</a>
+      </div>
+    </li>
+    {{if .InviteURL}}
+    <li>
+      <span class="step-n">03</span>
+      <div>
+        <b>No DMs coming through?</b>
+        <p>Join our server so the bot shares a server with you.</p>
+        <a class="btn ghost" href="{{.InviteURL}}" target="_blank" rel="noopener">Join server</a>
+      </div>
+    </li>
+    {{end}}
+  </ol>
+  <p class="waiting"><span class="pulse" aria-hidden="true"></span><span>Waiting for <code>/link</code>. This page continues on its own.</span></p>
+</section>
+{{end}}
+
+{{define "order-form"}}
+<section class="panel create">
+  <div class="panel-head"><h2 class="label">New order</h2></div>
+  <form id="order-form" class="order-form" hx-post="/orders/preview" hx-target="#modal" hx-disabled-elt="find button[type=submit]">
+    <label class="field amount">
+      <span>I have</span>
+      <input name="amount" type="number" min="1" step="1" inputmode="numeric" required placeholder="0" autocomplete="off">
+    </label>
+    <label class="field">
+      <span>Currency</span>
+      <select name="from">{{range $i, $c := .Currencies}}<option{{if eq $i 0}} selected{{end}}>{{$c}}</option>{{end}}</select>
+    </label>
+    <button type="button" class="swap" data-swap title="Swap currencies" aria-label="Swap currencies">⇄</button>
+    <label class="field">
+      <span>I want</span>
+      <select name="to">{{range $i, $c := .Currencies}}<option{{if eq $i 1}} selected{{end}}>{{$c}}</option>{{end}}</select>
+    </label>
+    <button class="btn primary" type="submit">Create order</button>
+  </form>
+</section>
+{{end}}
