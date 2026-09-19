@@ -183,7 +183,8 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 		theySend, theyGet = from, to
 		fulfilledCol = "filler_fulfilled_at"
 	}
-	trade := fmt.Sprintf("your trade on order `#%d` (you send **%d %s**, they send **%d %s**)", orderID, amount, theySend, amount, theyGet)
+	trade := fmt.Sprintf("your trade on order `#%d` (you provide **%s %s**, they provide **%s %s**)",
+		orderID, formatInt(amount), theySend, formatInt(amount), theyGet)
 	link := ""
 	if s.baseURL != "" {
 		link = "\n" + s.baseURL

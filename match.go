@@ -192,13 +192,14 @@ func queueDM(ctx context.Context, tx *sql.Tx, userID int64, msg string) error {
 
 func (s *Store) fillMessage(o Order, filler *User, n int64) string {
 	left := o.Remaining - n
-	head := fmt.Sprintf("**%s** filled **%d** of your **%s → %s** order `#%d`", filler.Name(), n, o.From, o.To, o.ID)
+	head := fmt.Sprintf("**%s** filled **%s** of your **%s → %s** order `#%d`", filler.Name(), formatInt(n), o.From, o.To, o.ID)
 	if left == 0 {
 		head += " and it's now **fully filled** ✅"
 	} else {
-		head += fmt.Sprintf(": **%d / %d** still open", left, o.Amount)
+		head += fmt.Sprintf(": **%s / %s** still open", formatInt(left), formatInt(o.Amount))
 	}
-	msg := fmt.Sprintf("%s\nYou send them **%d %s**; they send you **%d %s**. Decide on the site who sends the CONT.", head, n, o.From, n, o.To)
+	msg := fmt.Sprintf("%s\nYou provide **%s %s**, they provide **%s %s**. Decide on the site who sends the CONT.",
+		head, formatInt(n), o.From, formatInt(n), o.To)
 	if filler.DiscordID != "" && !isDevID(filler.DiscordID) {
 		msg += fmt.Sprintf("\nContact: <@%s>", filler.DiscordID)
 	}

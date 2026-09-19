@@ -197,7 +197,7 @@ func TestContFlow(t *testing.T) {
 	if err := act(alice, ActRequest); err != nil {
 		t.Fatal(err)
 	}
-	if dm := lastDM(); dm.UserID != bob.ID || !strings.Contains(dm.Message, "asks you to send the CONT") || !strings.Contains(dm.Message, "you send **30 NCC**") {
+	if dm := lastDM(); dm.UserID != bob.ID || !strings.Contains(dm.Message, "asks you to send the CONT") || !strings.Contains(dm.Message, "you provide **30 NCC**, they provide **30 AIC**") {
 		t.Fatalf("request DM: %+v", dm)
 	}
 	if state(alice) != ContAskedThem || state(bob) != ContAskedMe {
@@ -343,6 +343,37 @@ func TestMigrateExistingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
+}
+
+func TestDMNumbersHaveSeparators(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	mustPlace(t, s, alice, "AIC", "NCC", 2_500_000, false)
+	s.Fill(ctx, 1, bob, 1_234_567)
+	pending, _ := s.PendingNotifications(ctx, 10)
+	if len(pending) != 1 {
+		t.Fatalf("expected one fill DM, got %+v", pending)
+	}
+	msg := pending[0].Message
+	for _, want := range []string{
+		"filled **1,234,567** of your",
+		"**1,265,433 / 2,500,000** still open",
+		"You provide **1,234,567 AIC**, they provide **1,234,567 NCC**",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("fill DM missing %q:\n%s", want, msg)
+		}
+	}
+	s.MarkSent(ctx, pending[0].ID)
+
+	if _, err := s.ContAct(ctx, 1, bob, ActRequest); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = s.PendingNotifications(ctx, 10)
+	if len(pending) != 1 || !strings.Contains(pending[0].Message, "you provide **1,234,567 AIC**, they provide **1,234,567 NCC**") {
+		t.Fatalf("CONT DM: %+v", pending)
+	}
 }
 
 func TestKeepModeDoesNotFill(t *testing.T) {
