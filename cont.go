@@ -36,6 +36,7 @@ const (
 	ActMarkSent   ContAction = "sent"    // the sender has sent the CONT
 	ActFulfill    ContAction = "fulfill" // my side is done
 	ActUnfulfill  ContAction = "unfulfill"
+	ActCancel     ContAction = "cancel" // call the trade off, until the CONT is sent
 )
 
 var (
@@ -89,7 +90,7 @@ func (s *Store) Trades(ctx context.Context, userID int64, includeFulfilled bool,
 		JOIN orders o ON o.id = f.order_id
 		JOIN users owner ON owner.id = o.user_id
 		JOIN users filler ON filler.id = f.filler_id
-		WHERE (o.user_id = ?1 OR f.filler_id = ?1) AND (?2 OR mine_fulfilled = 0)
+		WHERE (o.user_id = ?1 OR f.filler_id = ?1) AND f.cancelled_at IS NULL AND (?2 OR mine_fulfilled = 0)
 		ORDER BY mine_fulfilled, f.created_at DESC, f.id DESC
 		LIMIT ?3`, userID, includeFulfilled, limit)
 	if err != nil {
@@ -134,8 +135,8 @@ func (s *Store) FulfilledCount(ctx context.Context, userID int64) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT count(*) FROM fills f JOIN orders o ON o.id = f.order_id
-		WHERE (o.user_id = ?1 AND f.owner_fulfilled_at IS NOT NULL)
-		   OR (f.filler_id = ?1 AND f.filler_fulfilled_at IS NOT NULL)`, userID).Scan(&n)
+		WHERE f.cancelled_at IS NULL AND ((o.user_id = ?1 AND f.owner_fulfilled_at IS NOT NULL)
+		   OR (f.filler_id = ?1 AND f.filler_fulfilled_at IS NOT NULL))`, userID).Scan(&n)
 	return n, err
 }
 
@@ -151,17 +152,17 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 	var orderID, ownerID, fillerID, amount int64
 	var from, to string
 	var ownerT, fillerT Trader
-	var contractor, requestFrom, sentAt sql.NullInt64
+	var contractor, requestFrom, sentAt, cancelledAt sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
 		SELECT o.id, o.user_id, f.filler_id, f.amount, o.from_cur, o.to_cur, `+traderCols("owner")+`, `+traderCols("filler")+`,
-			f.contractor_id, f.cont_request_from, f.cont_sent_at
+			f.contractor_id, f.cont_request_from, f.cont_sent_at, f.cancelled_at
 		FROM fills f
 		JOIN orders o ON o.id = f.order_id
 		JOIN users owner ON owner.id = o.user_id
 		JOIN users filler ON filler.id = f.filler_id
 		WHERE f.id = ?`, fillID).
 		Scan(append(append(append([]any{&orderID, &ownerID, &fillerID, &amount, &from, &to}, ownerT.dest()...), fillerT.dest()...),
-			&contractor, &requestFrom, &sentAt)...)
+			&contractor, &requestFrom, &sentAt, &cancelledAt)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Trader{}, errTradeNotFound
 	}
@@ -173,6 +174,9 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 	isOwner := me == ownerID
 	if !isOwner && me != fillerID {
 		return Trader{}, errTradeNotFound
+	}
+	if cancelledAt.Valid {
+		return Trader{}, userError("That trade was called off.")
 	}
 	otherID, other := fillerID, fillerT
 	// What the other side sends and receives: the owner offered `from`.
@@ -227,6 +231,27 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 			return Trader{}, err
 		}
 		dm = fmt.Sprintf("**%s** sent the CONT for %s. Accept it in-game, then mark the trade fulfilled.", user.Name(), trade)
+
+	case ActCancel:
+		if sentAt.Valid {
+			return Trader{}, userError("The CONT has already been sent, so the trade can't be called off here.")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE fills SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cont_sent_at IS NULL AND cancelled_at IS NULL`,
+			time.Now().Unix(), me, fillID); err != nil {
+			return Trader{}, err
+		}
+		// The amount goes back on the order, reopening it if it had filled up.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE orders SET remaining = remaining + ?1,
+				status = CASE WHEN status = 'filled' THEN 'open' ELSE status END
+			WHERE id = ?2`, amount, orderID); err != nil {
+			return Trader{}, err
+		}
+		dm = fmt.Sprintf("**%s** called off %s. Nothing is owed either way.", user.Name(), trade)
+		if !isOwner {
+			dm += fmt.Sprintf("\nYour order `#%d` has **%s %s** open again.", orderID, formatInt(amount), from)
+		}
 
 	case ActFulfill, ActUnfulfill:
 		if !sentAt.Valid {

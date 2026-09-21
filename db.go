@@ -136,6 +136,10 @@ var migrations = []string{
 	 ALTER TABLE users ADD COLUMN company_user_name TEXT;
 	 ALTER TABLE users ADD COLUMN corp_code TEXT;
 	 CREATE UNIQUE INDEX users_company ON users(company_code) WHERE company_code IS NOT NULL;`,
+	// A trade can be called off until the CONT is sent; the fill stays for
+	// history and its amount goes back on the order.
+	`ALTER TABLE fills ADD COLUMN cancelled_at INTEGER;
+	 ALTER TABLE fills ADD COLUMN cancelled_by INTEGER REFERENCES users(id);`,
 }
 
 func migrate(db *sql.DB) error {
@@ -410,7 +414,7 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (*Order, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.id, f.order_id, f.amount, f.created_at, `+traderCols("u")+`
 		FROM fills f JOIN users u ON u.id = f.filler_id
-		WHERE f.order_id = ? ORDER BY f.created_at, f.id`, id)
+		WHERE f.order_id = ? AND f.cancelled_at IS NULL ORDER BY f.created_at, f.id`, id)
 	if err != nil {
 		return nil, err
 	}

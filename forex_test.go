@@ -289,6 +289,8 @@ func TestMigrateSettledTrades(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, q := range []string{
+		`ALTER TABLE fills DROP COLUMN cancelled_at`,
+		`ALTER TABLE fills DROP COLUMN cancelled_by`,
 		`ALTER TABLE fills DROP COLUMN contractor_id`,
 		`ALTER TABLE fills DROP COLUMN cont_request_from`,
 		`ALTER TABLE fills DROP COLUMN cont_sent_at`,
@@ -373,6 +375,88 @@ func TestDMNumbersHaveSeparators(t *testing.T) {
 	pending, _ = s.PendingNotifications(ctx, 10)
 	if len(pending) != 1 || !strings.Contains(pending[0].Message, "you provide **1,234,567 AIC**, they provide **1,234,567 NCC**") {
 		t.Fatalf("CONT DM: %+v", pending)
+	}
+}
+
+func TestCancelTrade(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, bob, carol := newUser(t, s, "alice"), newUser(t, s, "bob"), newUser(t, s, "carol")
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+	s.Fill(ctx, 1, bob, 60)
+	s.Fill(ctx, 1, bob, 40)
+	if o, _ := s.OrderByID(ctx, 1); o.Remaining != 0 || o.Status != "filled" {
+		t.Fatalf("order should be filled: %+v", o)
+	}
+	s.db.Exec(`UPDATE notifications SET sent_at = 1`) // ignore the fill DMs
+
+	if _, err := s.ContAct(ctx, 1, carol, ActCancel); err != errTradeNotFound {
+		t.Fatalf("stranger calling off a trade: %v", err)
+	}
+
+	// The filler calls the first one off: it's un-filled and alice is told.
+	if _, err := s.ContAct(ctx, 1, bob, ActCancel); err != nil {
+		t.Fatal(err)
+	}
+	o, _ := s.OrderByID(ctx, 1)
+	if o.Remaining != 60 || o.Status != "open" || len(o.Fills) != 1 || o.Fills[0].ID != 2 {
+		t.Fatalf("order should reopen with 60 and one fill left: %+v", o)
+	}
+	pending, _ := s.PendingNotifications(ctx, 10)
+	if len(pending) != 1 || pending[0].UserID != alice.ID ||
+		!strings.Contains(pending[0].Message, "called off") ||
+		!strings.Contains(pending[0].Message, "has **60 AIC** open again") {
+		t.Fatalf("cancel DM: %+v", pending)
+	}
+	s.MarkSent(ctx, pending[0].ID)
+
+	// It's gone from both sides' trades, and can't be acted on again.
+	for _, u := range []*User{alice, bob} {
+		trades, _ := s.Trades(ctx, u.ID, true, 10)
+		if len(trades) != 1 || trades[0].FillID != 2 {
+			t.Fatalf("%s should only see the other trade: %+v", u.Handle, trades)
+		}
+	}
+	for _, a := range []ContAction{ActCancel, ActSendMyself, ActRequest} {
+		if _, err := s.ContAct(ctx, 1, bob, a); !isUserError(err) {
+			t.Fatalf("%s on a called-off trade: %v", a, err)
+		}
+	}
+
+	// The owner can call one off too, but not once the CONT is sent.
+	if _, err := s.ContAct(ctx, 2, alice, ActSendMyself); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ContAct(ctx, 2, alice, ActMarkSent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ContAct(ctx, 2, alice, ActCancel); !isUserError(err) {
+		t.Fatalf("calling off after the CONT is sent: %v", err)
+	}
+	if o, _ := s.OrderByID(ctx, 1); o.Remaining != 60 {
+		t.Fatalf("failed cancel shouldn't change the order: %+v", o)
+	}
+}
+
+func TestCancelTradeByOwnerReopensCancelledOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	mustPlace(t, s, alice, "AIC", "NCC", 50, false)
+	s.Fill(ctx, 1, bob, 20)
+	s.Cancel(ctx, 1, alice.ID)
+
+	if _, err := s.ContAct(ctx, 1, alice, ActCancel); err != nil {
+		t.Fatal(err)
+	}
+	o, _ := s.OrderByID(ctx, 1)
+	if o.Status != "cancelled" || o.Remaining != 50 {
+		t.Fatalf("a cancelled order stays cancelled: %+v", o)
+	}
+	pending, _ := s.PendingNotifications(ctx, 10)
+	if len(pending) == 0 || pending[len(pending)-1].UserID != bob.ID ||
+		strings.Contains(pending[len(pending)-1].Message, "open again") {
+		t.Fatalf("the filler is told, without the order line: %+v", pending)
 	}
 }
 
@@ -529,6 +613,8 @@ func TestCompanyMigrationGatesLinkedUsers(t *testing.T) {
 	s.Close()
 	db, _ := sql.Open("sqlite", "file:"+path)
 	for _, q := range []string{
+		`ALTER TABLE fills DROP COLUMN cancelled_at`,
+		`ALTER TABLE fills DROP COLUMN cancelled_by`,
 		`DROP INDEX users_company`,
 		`ALTER TABLE users DROP COLUMN company_code`,
 		`ALTER TABLE users DROP COLUMN company_user_name`,

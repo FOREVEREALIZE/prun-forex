@@ -373,6 +373,8 @@ func (s *Server) handleCont(w http.ResponseWriter, r *http.Request, u *User) {
 		s.toast(w, "ok", fmt.Sprintf("CONT marked sent. %s gets a DM to accept it.", other))
 	case ActFulfill:
 		s.toast(w, "ok", "Marked fulfilled. Tick “Show fulfilled” to see it again.")
+	case ActCancel:
+		s.toast(w, "ok", fmt.Sprintf("Trade called off. %s gets a DM, and the amount is back on the order.", other))
 	}
 }
 

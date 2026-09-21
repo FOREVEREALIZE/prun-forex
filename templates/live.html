@@ -107,14 +107,19 @@
               {{else if eq .Cont "undecided"}}
                 {{template "cont-btn" (contBtn .FillID "self" "primary" "I'll send it")}}
                 {{template "cont-btn" (contBtn .FillID "request" "ghost" "Ask them")}}
+                {{template "cancel-btn" .}}
               {{else if eq .Cont "asked-them"}}
                 {{template "cont-btn" (contBtn .FillID "self" "ghost" "I'll send it instead")}}
+                {{template "cancel-btn" .}}
               {{else if eq .Cont "asked-me"}}
                 {{template "cont-btn" (contBtn .FillID "self" "primary" "Accept")}}
                 {{template "cont-btn" (contBtn .FillID "request" "ghost" "Ask them instead")}}
+                {{template "cancel-btn" .}}
               {{else if eq .Cont "mine"}}
                 {{template "cont-btn" (contBtn .FillID "sent" "primary" "CONT sent")}}
+                {{template "cancel-btn" .}}
               {{else if eq .Cont "theirs"}}
+                {{template "cancel-btn" .}}
               {{else}}
                 {{template "cont-btn" (contBtn .FillID "fulfill" "settle" "✓ Fulfilled")}}
               {{end}}
@@ -159,6 +164,8 @@
   {{end}}
 </div>
 {{end}}
+
+{{define "cancel-btn"}}<button class="btn danger small" type="button" hx-post="/fills/{{.FillID}}/cont" hx-vals='{"action":"cancel"}' hx-swap="none" hx-disabled-elt="this" hx-confirm="Call off this trade with {{.Counterparty.Short}}? The {{num .Amount}} goes back on order #{{.OrderID}}.">Call off</button>{{end}}
 
 {{define "cont-btn"}}<button class="btn {{.Style}} small" type="button" hx-post="/fills/{{.FillID}}/cont" hx-vals='{"action":"{{.Action}}"}' hx-swap="none" hx-disabled-elt="this">{{.Label}}</button>{{end}}
 
