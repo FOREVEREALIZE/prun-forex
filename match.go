@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -89,7 +90,7 @@ func (s *Store) PlaceOrder(ctx context.Context, user *User, from, to string, amo
 				break
 			}
 			n := min(left, c.Remaining)
-			if err := s.applyFill(ctx, tx, c, user, n); err != nil {
+			if _, err := s.applyFill(ctx, tx, c, user, n); err != nil {
 				return res, err
 			}
 			left -= n
@@ -125,41 +126,43 @@ func (s *Store) PlaceOrder(ctx context.Context, user *User, from, to string, amo
 	return res, tx.Commit()
 }
 
-// Fill takes amount (0 = everything remaining) from someone else's order.
-func (s *Store) Fill(ctx context.Context, orderID int64, filler *User, amount int64) (int64, error) {
+// Fill takes amount (0 = everything remaining) from someone else's order,
+// returning the amount filled and the new fill's id.
+func (s *Store) Fill(ctx context.Context, orderID int64, filler *User, amount int64) (int64, int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
 
 	o, err := scanOrder(tx.QueryRowContext(ctx,
 		`SELECT `+orderCols+` FROM orders o JOIN users u ON u.id = o.user_id WHERE o.id = ?`, orderID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
+		return 0, 0, ErrNotFound
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	switch {
 	case o.UserID == filler.ID:
-		return 0, ErrOwnOrder
+		return 0, 0, ErrOwnOrder
 	case o.Status != "open":
-		return 0, ErrClosed
+		return 0, 0, ErrClosed
 	case amount < 0:
-		return 0, userError("Amount must be positive.")
+		return 0, 0, userError("Amount must be positive.")
 	case amount == 0:
 		amount = o.Remaining
 	case amount > o.Remaining:
-		return 0, ErrTooMuch
+		return 0, 0, ErrTooMuch
 	}
-	if err := s.applyFill(ctx, tx, o, filler, amount); err != nil {
-		return 0, err
+	fillID, err := s.applyFill(ctx, tx, o, filler, amount)
+	if err != nil {
+		return 0, 0, err
 	}
-	return amount, tx.Commit()
+	return amount, fillID, tx.Commit()
 }
 
-func (s *Store) applyFill(ctx context.Context, tx *sql.Tx, o Order, filler *User, n int64) error {
+func (s *Store) applyFill(ctx context.Context, tx *sql.Tx, o Order, filler *User, n int64) (int64, error) {
 	// The guarded UPDATE is the real overfill check; the caller's read may be stale.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE orders SET remaining = remaining - ?1,
@@ -167,26 +170,36 @@ func (s *Store) applyFill(ctx context.Context, tx *sql.Tx, o Order, filler *User
 		WHERE id = ?2 AND status = 'open' AND remaining >= ?1 AND user_id != ?3`,
 		n, o.ID, filler.ID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if rows, _ := res.RowsAffected(); rows != 1 {
-		return ErrTooMuch
+		return 0, ErrTooMuch
 	}
 	now := time.Now().Unix()
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO fills (order_id, filler_id, amount, created_at) VALUES (?, ?, ?, ?)`,
-		o.ID, filler.ID, n, now); err != nil {
-		return err
+	var fillID int64
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO fills (order_id, filler_id, amount, created_at) VALUES (?, ?, ?, ?) RETURNING id`,
+		o.ID, filler.ID, n, now).Scan(&fillID); err != nil {
+		return 0, err
 	}
-	return queueDM(ctx, tx, o.UserID, s.fillMessage(o, filler, n))
+	return fillID, queueDM(ctx, tx, o.UserID, s.fillMessage(o, filler, n), contButtons(ContUndecided, fillID))
 }
 
-// queueDM adds a DM to the outbox, if the user is still linked.
-func queueDM(ctx context.Context, tx *sql.Tx, userID int64, msg string) error {
+// queueDM adds a DM to the outbox, if the user is still linked. Buttons are
+// the Discord components to put on it, if any.
+func queueDM(ctx context.Context, tx *sql.Tx, userID int64, msg string, buttons []any) error {
+	var components any
+	if len(buttons) > 0 {
+		j, err := json.Marshal(buttons)
+		if err != nil {
+			return err
+		}
+		components = string(j)
+	}
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO notifications (user_id, message, next_at)
-		SELECT id, ?, ? FROM users WHERE id = ? AND linked_at IS NOT NULL`,
-		msg, time.Now().Unix(), userID)
+		INSERT INTO notifications (user_id, message, components, next_at)
+		SELECT id, ?, ?, ? FROM users WHERE id = ? AND linked_at IS NOT NULL`,
+		msg, components, time.Now().Unix(), userID)
 	return err
 }
 
@@ -198,7 +211,7 @@ func (s *Store) fillMessage(o Order, filler *User, n int64) string {
 	} else {
 		head += fmt.Sprintf(": **%s / %s** still open", formatInt(left), formatInt(o.Amount))
 	}
-	msg := fmt.Sprintf("%s\nYou provide **%s %s**, they provide **%s %s**. Decide on the site who sends the CONT.",
+	msg := fmt.Sprintf("%s\nYou provide **%s %s**, they provide **%s %s**. Who sends the CONT?",
 		head, formatInt(n), o.From, formatInt(n), o.To)
 	if filler.DiscordID != "" && !isDevID(filler.DiscordID) {
 		msg += fmt.Sprintf("\nContact: <@%s>", filler.DiscordID)

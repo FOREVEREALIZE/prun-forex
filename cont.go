@@ -81,6 +81,22 @@ func contState(me, other int64, contractor, requestFrom sql.NullInt64, sent bool
 // Trades lists fills the user took part in, as owner or filler, newest first.
 // Ones the user has marked fulfilled are left out unless includeFulfilled.
 func (s *Store) Trades(ctx context.Context, userID int64, includeFulfilled bool, limit int) ([]Trade, error) {
+	return s.trades(ctx, userID, 0, includeFulfilled, limit)
+}
+
+// TradeByID is one of the user's trades, fulfilled or not.
+func (s *Store) TradeByID(ctx context.Context, fillID, userID int64) (Trade, error) {
+	trades, err := s.trades(ctx, userID, fillID, true, 1)
+	if err != nil {
+		return Trade{}, err
+	}
+	if len(trades) == 0 {
+		return Trade{}, errTradeNotFound
+	}
+	return trades[0], nil
+}
+
+func (s *Store) trades(ctx context.Context, userID, fillID int64, includeFulfilled bool, limit int) ([]Trade, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.id, o.id, o.user_id, f.filler_id, `+traderCols("owner")+`, `+traderCols("filler")+`, o.from_cur, o.to_cur,
 			f.amount, f.created_at, f.contractor_id, f.cont_request_from, f.cont_sent_at IS NOT NULL,
@@ -91,8 +107,9 @@ func (s *Store) Trades(ctx context.Context, userID int64, includeFulfilled bool,
 		JOIN users owner ON owner.id = o.user_id
 		JOIN users filler ON filler.id = f.filler_id
 		WHERE (o.user_id = ?1 OR f.filler_id = ?1) AND f.cancelled_at IS NULL AND (?2 OR mine_fulfilled = 0)
+			AND (?4 = 0 OR f.id = ?4)
 		ORDER BY mine_fulfilled, f.created_at DESC, f.id DESC
-		LIMIT ?3`, userID, includeFulfilled, limit)
+		LIMIT ?3`, userID, includeFulfilled, limit, fillID)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +212,9 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 	}
 	requestedByOther := requestFrom.Valid && requestFrom.Int64 == otherID
 
+	// dm goes to the other side, with buttons for what they can do next.
 	var dm string
+	var dmButtons []any
 	switch action {
 	case ActSendMyself:
 		if contractor.Valid || sentAt.Valid {
@@ -209,6 +228,7 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 		} else {
 			dm = fmt.Sprintf("**%s** will send the CONT for %s. I'll DM you once it's sent.", user.Name(), trade)
 		}
+		dmButtons = contButtons(ContTheirs, fillID)
 
 	case ActRequest:
 		if contractor.Valid || sentAt.Valid || (requestFrom.Valid && requestFrom.Int64 == me) {
@@ -222,6 +242,7 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 		} else {
 			dm = fmt.Sprintf("**%s** asks you to send the CONT for %s. Accept or ask them instead:", user.Name(), trade)
 		}
+		dmButtons = contButtons(ContAskedMe, fillID)
 
 	case ActMarkSent:
 		if !contractor.Valid || contractor.Int64 != me || sentAt.Valid {
@@ -231,6 +252,7 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 			return Trader{}, err
 		}
 		dm = fmt.Sprintf("**%s** sent the CONT for %s. Accept it in-game, then mark the trade fulfilled.", user.Name(), trade)
+		dmButtons = contButtons(ContSentByThem, fillID)
 
 	case ActCancel:
 		if sentAt.Valid {
@@ -271,7 +293,7 @@ func (s *Store) ContAct(ctx context.Context, fillID int64, user *User, action Co
 	}
 
 	if dm != "" {
-		if err := queueDM(ctx, tx, otherID, dm+link); err != nil {
+		if err := queueDM(ctx, tx, otherID, dm+link, dmButtons); err != nil {
 			return Trader{}, err
 		}
 	}

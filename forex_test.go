@@ -8,9 +8,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -289,6 +291,7 @@ func TestMigrateSettledTrades(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, q := range []string{
+		`ALTER TABLE notifications DROP COLUMN components`,
 		`ALTER TABLE fills DROP COLUMN cancelled_at`,
 		`ALTER TABLE fills DROP COLUMN cancelled_by`,
 		`ALTER TABLE fills DROP COLUMN contractor_id`,
@@ -478,25 +481,25 @@ func TestFillRules(t *testing.T) {
 	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
 	mustPlace(t, s, alice, "AIC", "CIS", 50, false)
 
-	if _, err := s.Fill(ctx, 1, alice, 10); err != ErrOwnOrder {
+	if _, _, err := s.Fill(ctx, 1, alice, 10); err != ErrOwnOrder {
 		t.Fatalf("own order: got %v", err)
 	}
-	if _, err := s.Fill(ctx, 1, bob, 51); err != ErrTooMuch {
+	if _, _, err := s.Fill(ctx, 1, bob, 51); err != ErrTooMuch {
 		t.Fatalf("overfill: got %v", err)
 	}
-	if n, err := s.Fill(ctx, 1, bob, 20); err != nil || n != 20 {
+	if n, _, err := s.Fill(ctx, 1, bob, 20); err != nil || n != 20 {
 		t.Fatalf("partial: %d %v", n, err)
 	}
-	if n, err := s.Fill(ctx, 1, bob, 0); err != nil || n != 30 {
+	if n, _, err := s.Fill(ctx, 1, bob, 0); err != nil || n != 30 {
 		t.Fatalf("rest: %d %v", n, err)
 	}
-	if _, err := s.Fill(ctx, 1, bob, 1); err != ErrClosed {
+	if _, _, err := s.Fill(ctx, 1, bob, 1); err != ErrClosed {
 		t.Fatalf("filled order: got %v", err)
 	}
 	if err := s.Cancel(ctx, 1, alice.ID); err != ErrClosed {
 		t.Fatalf("cancel filled: got %v", err)
 	}
-	if _, err := s.Fill(ctx, 99, bob, 1); err != ErrNotFound {
+	if _, _, err := s.Fill(ctx, 99, bob, 1); err != ErrNotFound {
 		t.Fatalf("missing: got %v", err)
 	}
 }
@@ -520,7 +523,7 @@ func TestConcurrentFillsNeverOverfill(t *testing.T) {
 			defer wg.Done()
 			// Half fill directly, half go through the "take" flow.
 			if u.ID%2 == 0 {
-				if n, err := s.Fill(ctx, 1, u, 15); err == nil {
+				if n, _, err := s.Fill(ctx, 1, u, 15); err == nil {
 					filled.Add(n)
 				} else if err != ErrTooMuch && err != ErrClosed {
 					t.Error(err)
@@ -613,6 +616,7 @@ func TestCompanyMigrationGatesLinkedUsers(t *testing.T) {
 	s.Close()
 	db, _ := sql.Open("sqlite", "file:"+path)
 	for _, q := range []string{
+		`ALTER TABLE notifications DROP COLUMN components`,
 		`ALTER TABLE fills DROP COLUMN cancelled_at`,
 		`ALTER TABLE fills DROP COLUMN cancelled_by`,
 		`DROP INDEX users_company`,
@@ -825,6 +829,243 @@ func TestInteractions(t *testing.T) {
 	send(`{"type":2,"data":{"name":"unlink"},`+erin+`}`, true)
 	if linked().Linked {
 		t.Fatal("user should be unlinked after /unlink")
+	}
+}
+
+// discordHarness drives the bot through its interactions endpoint, the way
+// Discord would, capturing the messages it sends back.
+type discordHarness struct {
+	t        *testing.T
+	bot      *Bot
+	store    *Store
+	priv     ed25519.PrivateKey
+	mu       sync.Mutex
+	edits    []botReply
+	fnarBody string
+}
+
+type botReply struct {
+	Content    string `json:"content"`
+	Components []struct {
+		Components []struct {
+			Label    string `json:"label"`
+			CustomID string `json:"custom_id"`
+		} `json:"components"`
+	} `json:"components"`
+}
+
+func (r botReply) buttons() map[string]string {
+	out := map[string]string{}
+	for _, row := range r.Components {
+		for _, b := range row.Components {
+			out[b.Label] = b.CustomID
+		}
+	}
+	return out
+}
+
+func newDiscordHarness(t *testing.T, s *Store) *discordHarness {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	h := &discordHarness{t: t, store: s, priv: priv,
+		fnarBody: `{"UserName":"Nikuno","CompanyCode":"NIKU","CompanyName":"Nikuno Corp","CorporationCode":"NE","CorporationName":"Nikuno Enterprises"}`}
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/company/code/"):
+			w.Write([]byte(h.fnarBody))
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/messages/@original"):
+			var e botReply
+			json.NewDecoder(r.Body).Decode(&e)
+			h.mu.Lock()
+			h.edits = append(h.edits, e)
+			h.mu.Unlock()
+			w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+		}
+	}))
+	t.Cleanup(fake.Close)
+	bot, err := NewBot("app", "", hex.EncodeToString(pub), s, NewFNAR(fake.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot.api = fake.URL
+	h.bot = bot
+	return h
+}
+
+// send posts a signed interaction and returns the message the bot ended up with.
+func (h *discordHarness) send(u *User, body string) botReply {
+	h.t.Helper()
+	body = strings.ReplaceAll(body, "@USER", `"user":{"id":"`+u.DiscordID+`","username":"`+u.Handle+`"}`)
+	req := httptest.NewRequest(http.MethodPost, "/discord/interactions", bytes.NewBufferString(body))
+	ts := "1700000000"
+	req.Header.Set("X-Signature-Timestamp", ts)
+	req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(ed25519.Sign(h.priv, []byte(ts+body))))
+	rec := httptest.NewRecorder()
+	h.bot.HandleInteraction(rec, req)
+	h.bot.async.Wait()
+	if rec.Code != 200 {
+		h.t.Fatalf("interaction failed: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"type":5`) && !strings.Contains(rec.Body.String(), `"type":6`) {
+		var immediate struct {
+			Data botReply `json:"data"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &immediate)
+		return immediate.Data
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.edits) == 0 {
+		h.t.Fatal("no deferred reply")
+	}
+	return h.edits[len(h.edits)-1]
+}
+
+func (h *discordHarness) cmd(u *User, name string, options string) botReply {
+	h.t.Helper()
+	return h.send(u, `{"type":2,"token":"tok","application_id":"app","data":{"name":"`+name+`","options":[`+options+`]},@USER}`)
+}
+
+func (h *discordHarness) press(u *User, customID string) botReply {
+	h.t.Helper()
+	return h.send(u, `{"type":3,"token":"tok","application_id":"app","data":{"custom_id":"`+customID+`","component_type":2},@USER}`)
+}
+
+func str(name, v string) string { return `{"name":"` + name + `","type":3,"value":"` + v + `"}` }
+func num(name string, v int) string {
+	return `{"name":"` + name + `","type":4,"value":` + strconv.Itoa(v) + `}`
+}
+
+func TestDiscordCommands(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	h := newDiscordHarness(t, s)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+
+	// Someone who hasn't linked is told to.
+	stranger, _ := s.UpsertUser(ctx, "nope", "nope", "")
+	if r := h.cmd(stranger, "orders", ""); !strings.Contains(r.Content, "/link") {
+		t.Fatalf("unlinked user: %q", r.Content)
+	}
+
+	// Posting, with nothing to match.
+	r := h.cmd(alice, "post", num("amount", 100)+","+str("from", "AIC")+","+str("to", "NCC"))
+	if !strings.Contains(r.Content, "Order `#1` posted") || r.buttons()["Cancel #1"] != "order:cancel:1" {
+		t.Fatalf("post: %q %v", r.Content, r.buttons())
+	}
+
+	// Listing shows it; bob can fill it.
+	if r := h.cmd(bob, "orders", ""); !strings.Contains(r.Content, "`#1` **AIC → NCC** — **100** open — ALICE | ALIC") {
+		t.Fatalf("orders: %q", r.Content)
+	}
+	if r := h.cmd(bob, "orders", str("from", "CIS")); !strings.Contains(r.Content, "No open orders") {
+		t.Fatalf("filtered orders: %q", r.Content)
+	}
+	r = h.cmd(bob, "fill", num("order", 1)+","+num("amount", 40))
+	if !strings.Contains(r.Content, "Filled **40** on order `#1`") || !strings.Contains(r.Content, "who sends the CONT?") {
+		t.Fatalf("fill: %q", r.Content)
+	}
+	if r.buttons()["I'll send it"] != "cont:self:1" || r.buttons()["Call off"] != "cont:cancel:1" {
+		t.Fatalf("fill buttons: %v", r.buttons())
+	}
+
+	// Alice's fill DM carries the same buttons.
+	pending, _ := s.PendingNotifications(ctx, 10)
+	if len(pending) != 1 || !strings.Contains(pending[0].Components, `"cont:self:1"`) {
+		t.Fatalf("fill DM buttons: %+v", pending)
+	}
+	s.MarkSent(ctx, pending[0].ID)
+
+	// The whole CONT dance over buttons.
+	if r := h.press(alice, "cont:request:1"); !strings.Contains(r.Content, "you asked BOB to send the CONT") {
+		t.Fatalf("request: %q", r.Content)
+	}
+	if r := h.press(bob, "cont:self:1"); !strings.Contains(r.Content, "**you send the CONT**") || r.buttons()["CONT sent"] != "cont:sent:1" {
+		t.Fatalf("accept: %q %v", r.Content, r.buttons())
+	}
+	if r := h.press(alice, "cont:sent:1"); !strings.Contains(r.Content, "BOB sends the CONT") {
+		t.Fatalf("non-sender marking sent should say so: %q", r.Content)
+	}
+	if r := h.press(bob, "cont:sent:1"); !strings.Contains(r.Content, "you sent the CONT") || r.buttons()["Mark fulfilled"] != "cont:fulfill:1" {
+		t.Fatalf("sent: %q %v", r.Content, r.buttons())
+	}
+	if r := h.press(bob, "cont:fulfill:1"); !strings.Contains(r.Content, "fulfilled by you") || r.buttons()["Undo"] != "cont:unfulfill:1" {
+		t.Fatalf("fulfill: %q %v", r.Content, r.buttons())
+	}
+	if r := h.cmd(bob, "trades", ""); !strings.Contains(r.Content, "Nothing left to settle") {
+		t.Fatalf("trades after fulfilling: %q", r.Content)
+	}
+	if r := h.cmd(bob, "trades", `{"name":"fulfilled","type":5,"value":true}`); !strings.Contains(r.Content, "fulfilled by you") ||
+		r.buttons()["Trade #1"] != "trade:1" {
+		t.Fatalf("trades with fulfilled: %q %v", r.Content, r.buttons())
+	}
+	if r := h.press(bob, "trade:1"); !strings.Contains(r.Content, "order `#1`") {
+		t.Fatalf("trade button: %q", r.Content)
+	}
+
+	// Orders of your own, and cancelling.
+	if r := h.cmd(alice, "myorders", ""); !strings.Contains(r.Content, "`#1` **AIC → NCC** — 40 of 100 filled — open") {
+		t.Fatalf("myorders: %q", r.Content)
+	}
+	if r := h.press(bob, "order:cancel:1"); !strings.Contains(r.Content, "Couldn't cancel") {
+		t.Fatalf("cancelling someone else's order: %q", r.Content)
+	}
+	if r := h.press(alice, "order:cancel:1"); !strings.Contains(r.Content, "cancelled") {
+		t.Fatalf("cancel: %q", r.Content)
+	}
+	if o, _ := s.OrderByID(ctx, 1); o.Status != "cancelled" {
+		t.Fatalf("order should be cancelled: %+v", o)
+	}
+}
+
+func TestDiscordPostWithMatchAndExistingOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	h := newDiscordHarness(t, s)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+
+	// Bob's order could be filled by Alice's: he's asked first.
+	r := h.cmd(bob, "post", num("amount", 150)+","+str("from", "NCC")+","+str("to", "AIC"))
+	if !strings.Contains(r.Content, "cover **100** of your **150 NCC**, leaving **50**") {
+		t.Fatalf("match prompt: %q", r.Content)
+	}
+	take := r.buttons()["Fill 100, post the rest"]
+	if take != "post:take:NCC:AIC:150:0" || r.buttons()["Post it anyway"] != "post:keep:NCC:AIC:150:0" {
+		t.Fatalf("match buttons: %v", r.buttons())
+	}
+	if r := h.press(bob, take); !strings.Contains(r.Content, "Filled **100 NCC → AIC**") || !strings.Contains(r.Content, "remaining **50**") {
+		t.Fatalf("take: %q", r.Content)
+	}
+	if o, _ := s.OrderByID(ctx, 1); o.Status != "filled" {
+		t.Fatalf("alice's order should be filled: %+v", o)
+	}
+
+	// Posting the same pair again asks whether to add to the order he has.
+	r = h.cmd(bob, "post", num("amount", 25)+","+str("from", "NCC")+","+str("to", "AIC"))
+	if !strings.Contains(r.Content, "already have an open **NCC → AIC** order `#2`") {
+		t.Fatalf("dup prompt: %q", r.Content)
+	}
+	add := r.buttons()["Add to #2"]
+	if add != "post:post:NCC:AIC:25:2" || r.buttons()["Post separately"] != "post:post:NCC:AIC:25:0" {
+		t.Fatalf("dup buttons: %v", r.buttons())
+	}
+	if r := h.press(bob, add); !strings.Contains(r.Content, "Added **25** to order `#2`, now **75** open") {
+		t.Fatalf("add to existing: %q", r.Content)
+	}
+	if o, _ := s.OrderByID(ctx, 2); o.Amount != 75 {
+		t.Fatalf("order should have grown: %+v", o)
+	}
+
+	// Calling a trade off from a button puts the amount back.
+	trades, _ := s.Trades(ctx, alice.ID, false, 5)
+	if r := h.press(alice, fmt.Sprintf("cont:cancel:%d", trades[0].FillID)); !strings.Contains(r.Content, "called off") {
+		t.Fatalf("call off: %q", r.Content)
+	}
+	if o, _ := s.OrderByID(ctx, 1); o.Status != "open" || o.Remaining != 100 {
+		t.Fatalf("order should reopen: %+v", o)
 	}
 }
 

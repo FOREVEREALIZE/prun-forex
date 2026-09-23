@@ -91,24 +91,10 @@ func (b *Bot) call(ctx context.Context, method, path string, body, out any) erro
 	return nil
 }
 
-// RegisterCommands replaces the app's global commands with /link and /unlink,
-// usable in a DM with the bot, whether the app is installed on a user or a server.
+// RegisterCommands replaces the app's global commands, all usable in a DM
+// with the bot, whether the app is installed on a user or a server.
 func (b *Bot) RegisterCommands(ctx context.Context) error {
-	cmd := func(name, desc string, options ...any) map[string]any {
-		return map[string]any{
-			"name": name, "description": desc, "type": 1, "options": options,
-			"integration_types": []int{0, 1}, // guild install, user install
-			"contexts":          []int{1},    // bot DM
-		}
-	}
-	companyCode := map[string]any{
-		"type": 3, "name": "company_code", "required": true, "min_length": 1, "max_length": 4,
-		"description": "Your Prosperous Universe company code, e.g. NIKU",
-	}
-	return b.call(ctx, http.MethodPut, "/applications/"+b.appID+"/commands", []any{
-		cmd("link", "Link your Discord account and PrUn company so you can trade and get fill DMs", companyCode),
-		cmd("unlink", "Stop PrUn Forex from DMing you (you'll need to /link again to trade)"),
-	}, nil)
+	return b.call(ctx, http.MethodPut, "/applications/"+b.appID+"/commands", b.commands(), nil)
 }
 
 type interaction struct {
@@ -129,15 +115,31 @@ type interaction struct {
 	} `json:"member"`
 }
 
-func (in interaction) option(name string) string {
+func (in interaction) optionRaw(name string) json.RawMessage {
 	for _, o := range in.Data.Options {
 		if o.Name == name {
-			var v string
-			json.Unmarshal(o.Value, &v)
-			return v
+			return o.Value
 		}
 	}
-	return ""
+	return nil
+}
+
+func (in interaction) option(name string) string {
+	var v string
+	json.Unmarshal(in.optionRaw(name), &v)
+	return v
+}
+
+func (in interaction) optionInt(name string) int64 {
+	var v int64
+	json.Unmarshal(in.optionRaw(name), &v)
+	return v
+}
+
+func (in interaction) optionBool(name string) bool {
+	var v bool
+	json.Unmarshal(in.optionRaw(name), &v)
+	return v
 }
 
 func (b *Bot) verify(r *http.Request, body []byte) bool {
@@ -207,7 +209,7 @@ func (b *Bot) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(w, "Unlinked. I won't DM you anymore. Run `/link company_code:ABCD` to trade again.")
 	default:
-		reply(w, "Unknown command.")
+		b.deferred(w, in, 5, func(ctx context.Context) botMessage { return b.command(ctx, in, *user) })
 	}
 }
 
@@ -300,7 +302,7 @@ func (b *Bot) handleButton(w http.ResponseWriter, in interaction, user discordUs
 		// case it changed or someone else linked it in the meantime.
 		b.deferred(w, in, 6, func(ctx context.Context) botMessage { return botMessage{Content: b.link(ctx, user, code)} })
 	default:
-		update("That button doesn't do anything anymore. Run `/link` again.")
+		b.deferred(w, in, 6, func(ctx context.Context) botMessage { return b.buttonPress(ctx, id, user) })
 	}
 }
 
@@ -325,7 +327,7 @@ func reply(w http.ResponseWriter, content string) {
 	writeJSON(w, map[string]any{"type": 4, "data": map[string]any{"content": content}})
 }
 
-func (b *Bot) sendDM(ctx context.Context, discordID, content string) error {
+func (b *Bot) sendDM(ctx context.Context, discordID, content, components string) error {
 	b.mu.Lock()
 	ch := b.dmChannels[discordID]
 	b.mu.Unlock()
@@ -341,10 +343,14 @@ func (b *Bot) sendDM(ctx context.Context, discordID, content string) error {
 		b.dmChannels[discordID] = ch
 		b.mu.Unlock()
 	}
-	return b.call(ctx, http.MethodPost, "/channels/"+ch+"/messages", map[string]any{
+	msg := map[string]any{
 		"content":          content,
 		"allowed_mentions": map[string]any{"parse": []string{}},
-	}, nil)
+	}
+	if components != "" {
+		msg["components"] = json.RawMessage(components)
+	}
+	return b.call(ctx, http.MethodPost, "/channels/"+ch+"/messages", msg, nil)
 }
 
 const maxAttempts = 8
@@ -378,7 +384,7 @@ func (b *Bot) deliver(ctx context.Context, n Notification) error {
 		log.Printf("DM (not sent) to %s:\n%s", n.DiscordID, n.Message)
 		return b.store.MarkSent(ctx, n.ID)
 	}
-	err := b.sendDM(ctx, n.DiscordID, n.Message)
+	err := b.sendDM(ctx, n.DiscordID, n.Message, n.Components)
 	if err == nil {
 		return b.store.MarkSent(ctx, n.ID)
 	}

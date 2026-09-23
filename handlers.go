@@ -334,7 +334,7 @@ func (s *Server) handleFill(w http.ResponseWriter, r *http.Request, u *User) {
 			return
 		}
 	}
-	n, err := s.store.Fill(r.Context(), id, u, amount)
+	n, _, err := s.store.Fill(r.Context(), id, u, amount)
 	w.Header().Set("HX-Trigger", "refresh")
 	if err != nil {
 		if isUserError(err) {

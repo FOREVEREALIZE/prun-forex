@@ -140,6 +140,8 @@ var migrations = []string{
 	// history and its amount goes back on the order.
 	`ALTER TABLE fills ADD COLUMN cancelled_at INTEGER;
 	 ALTER TABLE fills ADD COLUMN cancelled_by INTEGER REFERENCES users(id);`,
+	// DMs can carry Discord buttons, stored as the components JSON to send.
+	`ALTER TABLE notifications ADD COLUMN components TEXT;`,
 }
 
 func migrate(db *sql.DB) error {
@@ -308,6 +310,18 @@ func (s *Store) Unlink(ctx context.Context, discordID string) error {
 	return err
 }
 
+func (s *Store) UserByDiscordID(ctx context.Context, discordID string) (*User, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM users WHERE discord_id = ?`, discordID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.UserByID(ctx, id)
+}
+
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	u := &User{ID: id}
 	err := s.db.QueryRowContext(ctx,
@@ -444,16 +458,17 @@ func (s *Store) Cancel(ctx context.Context, orderID, userID int64) error {
 }
 
 type Notification struct {
-	ID        int64
-	UserID    int64
-	DiscordID string
-	Message   string
-	Attempts  int
+	ID         int64
+	UserID     int64
+	DiscordID  string
+	Message    string
+	Components string // JSON array of Discord components, or empty
+	Attempts   int
 }
 
 func (s *Store) PendingNotifications(ctx context.Context, limit int) ([]Notification, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT n.id, n.user_id, u.discord_id, n.message, n.attempts
+		SELECT n.id, n.user_id, u.discord_id, n.message, COALESCE(n.components, ''), n.attempts
 		FROM notifications n JOIN users u ON u.id = n.user_id
 		WHERE n.sent_at IS NULL AND n.failed_at IS NULL AND n.next_at <= ?
 		ORDER BY n.next_at, n.id LIMIT ?`, time.Now().Unix(), limit)
@@ -464,7 +479,7 @@ func (s *Store) PendingNotifications(ctx context.Context, limit int) ([]Notifica
 	var out []Notification
 	for rows.Next() {
 		var n Notification
-		if err := rows.Scan(&n.ID, &n.UserID, &n.DiscordID, &n.Message, &n.Attempts); err != nil {
+		if err := rows.Scan(&n.ID, &n.UserID, &n.DiscordID, &n.Message, &n.Components, &n.Attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, n)

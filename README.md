@@ -34,6 +34,22 @@ Settling a trade: under **Trades to settle**, one side volunteers to send the CO
 
 Before a user can trade, they add the app, DM the bot and run `/link company_code:ABCD` with their in-game company code. The bot looks the company up on FNAR, shows who owns it and which corporation it's in, and asks the user to confirm with Yes/No. On Yes it stores the company code, the in-game username and the corporation code. Traders then show as `[CORP] Username | CODE` with their `@discord` handle underneath. Each company can only be linked to one Discord account. Users who linked before company codes existed are sent back through onboarding on the site, with an explanation, until they run `/link` again. If a DM later fails with "cannot send messages to this user", they're unlinked and have to run `/link` again.
 
+## Discord commands
+
+Everything on the site can also be done in the bot's DM, and the DMs it sends carry buttons for the next step (accept a CONT request, mark it sent, mark the trade fulfilled, call it off). Pressing a button rewrites that message as an up-to-date card for the trade.
+
+| command | |
+|---|---|
+| `/link company_code:ABCD` | Link your Discord account and company |
+| `/unlink` | Stop the DMs (you'll need to `/link` again to trade) |
+| `/orders [from] [to]` | Open orders on the board |
+| `/post amount from to` | Post an order; asks first if it could fill existing orders, or if you already have one for that pair |
+| `/fill order [amount]` | Fill someone's order, fully or in part |
+| `/cancel order` | Cancel your own order |
+| `/myorders` | Your orders |
+| `/trades [fulfilled]` | Your trades to settle, with buttons |
+| `/trade id` | One trade with its buttons |
+
 ## JSON API
 
 - `GET /api/orders?status=open|filled|cancelled|all&from=AIC&to=NCC&limit=100`
