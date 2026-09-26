@@ -113,7 +113,30 @@ type interaction struct {
 	Member *struct {
 		User *discordUser `json:"user"`
 	} `json:"member"`
+	// Context is 0 in a server, 1 in the bot's own DM, 2 in any other DM.
+	Context *int `json:"context"`
 }
+
+func (in interaction) inBotDM() bool { return in.Context == nil || *in.Context == 1 }
+
+// publicCommands post where everyone in the channel can see them. The rest
+// stay with the person who ran them: their own orders, trades and anything
+// with buttons only they should press.
+var publicCommands = map[string]bool{"orders": true}
+
+// ephemeral decides whether a reply is visible only to the person who asked.
+// In the bot's own DM there's nobody else to hide it from.
+func (in interaction) ephemeral() bool {
+	if in.inBotDM() {
+		return false
+	}
+	if publicCommands[in.Data.Name] {
+		return in.optionBool("private")
+	}
+	return true
+}
+
+const ephemeralFlag = 64
 
 func (in interaction) optionRaw(name string) json.RawMessage {
 	for _, o := range in.Data.Options {
@@ -185,7 +208,7 @@ func (b *Bot) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 		user = in.Member.User
 	}
 	if user == nil {
-		reply(w, "Couldn't tell who you are.")
+		reply(w, in, "Couldn't tell who you are.")
 		return
 	}
 	if in.Type == 3 {
@@ -197,17 +220,17 @@ func (b *Bot) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 	case "link":
 		code := NormalizeCompanyCode(in.option("company_code"))
 		if code == "" {
-			reply(w, "Give your company code (1–4 letters), e.g. `/link company_code:NIKU`.")
+			reply(w, in, "Give your company code (1–4 letters), e.g. `/link company_code:NIKU`.")
 			return
 		}
 		b.deferred(w, in, 5, func(ctx context.Context) botMessage { return b.confirmLink(ctx, *user, code) })
 	case "unlink":
 		if err := b.store.Unlink(ctx, user.ID); err != nil {
 			log.Printf("unlink %s: %v", user.ID, err)
-			reply(w, "Something went wrong, try again in a moment.")
+			reply(w, in, "Something went wrong, try again in a moment.")
 			return
 		}
-		reply(w, "Unlinked. I won't DM you anymore. Run `/link company_code:ABCD` to trade again.")
+		reply(w, in, "Unlinked. I won't DM you anymore. Run `/link company_code:ABCD` to trade again.")
 	default:
 		b.deferred(w, in, 5, func(ctx context.Context) botMessage { return b.command(ctx, in, *user) })
 	}
@@ -223,7 +246,12 @@ type botMessage struct {
 // 6 to update the message a button is on), does work that may take longer
 // than Discord's 3 seconds, then edits the message with the result.
 func (b *Bot) deferred(w http.ResponseWriter, in interaction, ackType int, work func(context.Context) botMessage) {
-	writeJSON(w, map[string]any{"type": ackType})
+	ack := map[string]any{"type": ackType}
+	// Only a new reply can choose; an update keeps the original message's flags.
+	if ackType == 5 && in.ephemeral() {
+		ack["data"] = map[string]any{"flags": ephemeralFlag}
+	}
+	writeJSON(w, ack)
 	b.async.Add(1)
 	go func() {
 		defer b.async.Done()
@@ -323,8 +351,12 @@ func (b *Bot) link(ctx context.Context, user discordUser, code string) string {
 	return fmt.Sprintf("**Linked** as **%s** ✅ You can use PrUn Forex now, and I'll DM you here when your orders get filled.\n%s", u.Name(), b.store.baseURL)
 }
 
-func reply(w http.ResponseWriter, content string) {
-	writeJSON(w, map[string]any{"type": 4, "data": map[string]any{"content": content}})
+func reply(w http.ResponseWriter, in interaction, content string) {
+	data := map[string]any{"content": content}
+	if in.ephemeral() {
+		data["flags"] = ephemeralFlag
+	}
+	writeJSON(w, map[string]any{"type": 4, "data": data})
 }
 
 func (b *Bot) sendDM(ctx context.Context, discordID, content, components string) error {

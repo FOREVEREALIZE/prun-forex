@@ -120,8 +120,8 @@ func (b *Bot) commands() []any {
 	cmd := func(name, desc string, options ...any) map[string]any {
 		return map[string]any{
 			"name": name, "description": desc, "type": 1, "options": options,
-			"integration_types": []int{0, 1}, // guild install, user install
-			"contexts":          []int{1},    // bot DM
+			"integration_types": []int{0, 1},    // guild install, user install
+			"contexts":          []int{0, 1, 2}, // server, bot DM, any other DM
 		}
 	}
 	opt := func(typ int, name, desc string, required bool, extra map[string]any) map[string]any {
@@ -152,7 +152,8 @@ func (b *Bot) commands() []any {
 		cmd("unlink", "Stop PrUn Forex from DMing you (you'll need to /link again to trade)"),
 		cmd("orders", "List open orders on the board",
 			currency("from", "Only orders offering this currency", false),
-			currency("to", "Only orders wanting this currency", false)),
+			currency("to", "Only orders wanting this currency", false),
+			opt(5, "private", "Show the list only to you (default: everyone in the channel)", false, nil)),
 		cmd("post", "Post an order to swap one currency for another, 1:1",
 			amount(true, "How much you're offering"),
 			currency("from", "What you have", true),

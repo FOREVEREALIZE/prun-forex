@@ -26,7 +26,7 @@ SESSION_KEY=$(openssl rand -hex 32) BASE_URL=https://forex.example.com \
 ## Discord app setup
 
 1. **OAuth2 → Redirects**: add `$BASE_URL/auth/discord`. Sign-in uses the implicit grant in the browser, so there's no client secret. The server uses the access token once to call `/users/@me` and never stores it.
-2. **Installation**: enable **User Install** (and Guild Install if you want) with the `applications.commands` scope.
+2. **Installation**: enable **User Install** and **Guild Install**, both with the `applications.commands` scope (Guild Install also wants `bot`). Users add the app to their account from the site's onboarding; server admins can invite it with `https://discord.com/oauth2/authorize?client_id=$DISCORD_APP_ID&scope=bot+applications.commands&permissions=0`.
 3. **General → Interactions Endpoint URL**: `$BASE_URL/discord/interactions`. For local dev, expose the server with `cloudflared tunnel --url localhost:8080`.
 4. **Bot**: copy the token into `DISCORD_BOT_TOKEN`.
 
@@ -36,13 +36,15 @@ Before a user can trade, they add the app, DM the bot and run `/link company_cod
 
 ## Discord commands
 
-Everything on the site can also be done in the bot's DM, and the DMs it sends carry buttons for the next step (accept a CONT request, mark it sent, mark the trade fulfilled, call it off). Pressing a button rewrites that message as an up-to-date card for the trade.
+Every command works in the bot's DM, in a server, and in any other DM, whether the app is installed on a server or added to your own account. `/orders` posts where everyone can see it (the board is public on the site too, and `private:True` keeps it to yourself); everything else — your orders, trades, fills and linking — is shown only to whoever ran it. In the bot's own DM nothing is hidden, so the messages stay in your history.
+
+The DMs the bot sends carry buttons for the next step (accept a CONT request, mark it sent, mark the trade fulfilled, call it off). Pressing a button rewrites that message as an up-to-date card for the trade.
 
 | command | |
 |---|---|
 | `/link company_code:ABCD` | Link your Discord account and company |
 | `/unlink` | Stop the DMs (you'll need to `/link` again to trade) |
-| `/orders [from] [to]` | Open orders on the board |
+| `/orders [from] [to] [private]` | Open orders on the board |
 | `/post amount from to` | Post an order; asks first if it could fill existing orders, or if you already have one for that pair |
 | `/fill order [amount]` | Fill someone's order, fully or in part |
 | `/cancel order` | Cancel your own order |

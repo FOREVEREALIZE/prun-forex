@@ -842,6 +842,12 @@ type discordHarness struct {
 	mu       sync.Mutex
 	edits    []botReply
 	fnarBody string
+	lastAck  string // the immediate response Discord got
+}
+
+// hidden reports whether the last reply was ephemeral (only the caller sees it).
+func (h *discordHarness) hidden() bool {
+	return strings.Contains(h.lastAck, `"flags":64`)
 }
 
 type botReply struct {
@@ -908,6 +914,7 @@ func (h *discordHarness) send(u *User, body string) botReply {
 	if rec.Code != 200 {
 		h.t.Fatalf("interaction failed: %d %s", rec.Code, rec.Body)
 	}
+	h.lastAck = rec.Body.String()
 	if !strings.Contains(rec.Body.String(), `"type":5`) && !strings.Contains(rec.Body.String(), `"type":6`) {
 		var immediate struct {
 			Data botReply `json:"data"`
@@ -925,7 +932,14 @@ func (h *discordHarness) send(u *User, body string) botReply {
 
 func (h *discordHarness) cmd(u *User, name string, options string) botReply {
 	h.t.Helper()
-	return h.send(u, `{"type":2,"token":"tok","application_id":"app","data":{"name":"`+name+`","options":[`+options+`]},@USER}`)
+	return h.cmdIn(u, 1, name, options) // the bot's own DM
+}
+
+// cmdIn runs a command in a context: 0 a server, 1 the bot's DM, 2 another DM.
+func (h *discordHarness) cmdIn(u *User, context int, name, options string) botReply {
+	h.t.Helper()
+	return h.send(u, `{"type":2,"token":"tok","application_id":"app","context":`+strconv.Itoa(context)+
+		`,"data":{"name":"`+name+`","options":[`+options+`]},@USER}`)
 }
 
 func (h *discordHarness) press(u *User, customID string) botReply {
@@ -1066,6 +1080,58 @@ func TestDiscordPostWithMatchAndExistingOrder(t *testing.T) {
 	}
 	if o, _ := s.OrderByID(ctx, 1); o.Status != "open" || o.Remaining != 100 {
 		t.Fatalf("order should reopen: %+v", o)
+	}
+}
+
+func TestDiscordWorksOutsideBotDM(t *testing.T) {
+	s := newTestStore(t)
+	h := newDiscordHarness(t, s)
+	alice := newUser(t, s, "alice")
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+
+	// Every command is offered in servers and other DMs, not just the bot's.
+	for _, c := range h.bot.commands() {
+		cmd := c.(map[string]any)
+		if got := cmd["contexts"]; fmt.Sprint(got) != "[0 1 2]" {
+			t.Errorf("/%s contexts = %v", cmd["name"], got)
+		}
+		if got := cmd["integration_types"]; fmt.Sprint(got) != "[0 1]" {
+			t.Errorf("/%s integration_types = %v", cmd["name"], got)
+		}
+	}
+
+	// The board is public, like it is on the site.
+	if r := h.cmdIn(alice, 0, "orders", ""); h.hidden() || !strings.Contains(r.Content, "`#1`") {
+		t.Fatalf("orders in a server should be visible: hidden=%v %q", h.hidden(), r.Content)
+	}
+	if h.cmdIn(alice, 0, "orders", `{"name":"private","type":5,"value":true}`); !h.hidden() {
+		t.Fatal("orders with private:True should be hidden")
+	}
+
+	// Anything personal is shown only to whoever ran it.
+	for _, name := range []string{"myorders", "trades", "post", "fill", "cancel", "trade", "link"} {
+		h.cmdIn(alice, 0, name, "")
+		if !h.hidden() {
+			t.Errorf("/%s in a server should be hidden", name)
+		}
+		h.cmdIn(alice, 2, name, "")
+		if !h.hidden() {
+			t.Errorf("/%s in another DM should be hidden", name)
+		}
+	}
+
+	// In the bot's own DM nothing is hidden, so the messages stay in history.
+	for _, name := range []string{"orders", "myorders", "trades"} {
+		if h.cmd(alice, name, ""); h.hidden() {
+			t.Errorf("/%s in the bot DM shouldn't be hidden", name)
+		}
+	}
+
+	// A command from a server member comes as member.user rather than user.
+	body := `{"type":2,"token":"tok","application_id":"app","context":0,"data":{"name":"myorders","options":[]},` +
+		`"member":{"user":{"id":"` + alice.DiscordID + `","username":"alice"}}}`
+	if r := h.send(alice, body); !strings.Contains(r.Content, "Your orders:") {
+		t.Fatalf("member command: %q", r.Content)
 	}
 }
 
