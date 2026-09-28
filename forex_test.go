@@ -1092,8 +1092,12 @@ func TestDiscordWorksOutsideBotDM(t *testing.T) {
 	// Every command is offered in servers and other DMs, not just the bot's.
 	for _, c := range h.bot.commands() {
 		cmd := c.(map[string]any)
-		if got := cmd["contexts"]; fmt.Sprint(got) != "[0 1 2]" {
-			t.Errorf("/%s contexts = %v", cmd["name"], got)
+		want := "[0 1 2]"
+		if cmd["name"] == "link" {
+			want = "[1]" // linking stays in the bot's DM
+		}
+		if got := cmd["contexts"]; fmt.Sprint(got) != want {
+			t.Errorf("/%s contexts = %v, want %s", cmd["name"], got, want)
 		}
 		if got := cmd["integration_types"]; fmt.Sprint(got) != "[0 1]" {
 			t.Errorf("/%s integration_types = %v", cmd["name"], got)
@@ -1108,8 +1112,16 @@ func TestDiscordWorksOutsideBotDM(t *testing.T) {
 		t.Fatal("orders with private:True should be hidden")
 	}
 
+	// /link only works in the bot's DM, wherever it's somehow invoked from.
+	if r := h.cmdIn(alice, 0, "link", str("company_code", "NIKU")); !strings.Contains(r.Content, "in a DM with me") {
+		t.Fatalf("/link in a server: %q", r.Content)
+	}
+	if u, _ := s.UserByID(context.Background(), alice.ID); u.CompanyCode != "ALIC" {
+		t.Fatalf("/link outside a DM shouldn't link: %+v", u)
+	}
+
 	// Anything personal is shown only to whoever ran it.
-	for _, name := range []string{"myorders", "trades", "post", "fill", "cancel", "trade", "link"} {
+	for _, name := range []string{"myorders", "trades", "post", "fill", "cancel", "trade"} {
 		h.cmdIn(alice, 0, name, "")
 		if !h.hidden() {
 			t.Errorf("/%s in a server should be hidden", name)

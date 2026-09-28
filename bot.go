@@ -218,6 +218,10 @@ func (b *Bot) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch in.Data.Name {
 	case "link":
+		if !in.inBotDM() {
+			reply(w, in, "Run `/link` in a DM with me, not here.")
+			return
+		}
 		code := NormalizeCompanyCode(in.option("company_code"))
 		if code == "" {
 			reply(w, in, "Give your company code (1–4 letters), e.g. `/link company_code:NIKU`.")

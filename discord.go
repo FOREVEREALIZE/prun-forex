@@ -145,10 +145,14 @@ func (b *Bot) commands() []any {
 		return opt(4, "order", desc, true, map[string]any{"min_value": 1})
 	}
 
+	// Linking ties a Discord account to a company, so it stays in the bot's DM.
+	link := cmd("link", "Link your Discord account and PrUn company so you can trade and get fill DMs",
+		opt(3, "company_code", "Your Prosperous Universe company code, e.g. NIKU", true,
+			map[string]any{"min_length": 1, "max_length": 4}))
+	link["contexts"] = []int{1}
+
 	return []any{
-		cmd("link", "Link your Discord account and PrUn company so you can trade and get fill DMs",
-			opt(3, "company_code", "Your Prosperous Universe company code, e.g. NIKU", true,
-				map[string]any{"min_length": 1, "max_length": 4})),
+		link,
 		cmd("unlink", "Stop PrUn Forex from DMing you (you'll need to /link again to trade)"),
 		cmd("orders", "List open orders on the board",
 			currency("from", "Only orders offering this currency", false),

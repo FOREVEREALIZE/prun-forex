@@ -36,13 +36,13 @@ Before a user can trade, they add the app, DM the bot and run `/link company_cod
 
 ## Discord commands
 
-Every command works in the bot's DM, in a server, and in any other DM, whether the app is installed on a server or added to your own account. `/orders` posts where everyone can see it (the board is public on the site too, and `private:True` keeps it to yourself); everything else — your orders, trades, fills and linking — is shown only to whoever ran it. In the bot's own DM nothing is hidden, so the messages stay in your history.
+Every command except `/link`, which stays in the bot's DM, works in the bot's DM, in a server, and in any other DM, whether the app is installed on a server or added to your own account. `/orders` posts where everyone can see it (the board is public on the site too, and `private:True` keeps it to yourself); everything else — your orders, trades, fills and linking — is shown only to whoever ran it. In the bot's own DM nothing is hidden, so the messages stay in your history.
 
 The DMs the bot sends carry buttons for the next step (accept a CONT request, mark it sent, mark the trade fulfilled, call it off). Pressing a button rewrites that message as an up-to-date card for the trade.
 
 | command | |
 |---|---|
-| `/link company_code:ABCD` | Link your Discord account and company |
+| `/link company_code:ABCD` | Link your Discord account and company (DM only) |
 | `/unlink` | Stop the DMs (you'll need to `/link` again to trade) |
 | `/orders [from] [to] [private]` | Open orders on the board |
 | `/post amount from to` | Post an order; asks first if it could fill existing orders, or if you already have one for that pair |
