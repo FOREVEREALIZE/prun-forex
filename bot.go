@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,17 +102,16 @@ type interaction struct {
 	Type          int    `json:"type"`
 	Token         string `json:"token"`
 	ApplicationID string `json:"application_id"`
+	GuildID       string `json:"guild_id"`
 	Data          struct {
-		Name     string `json:"name"`
-		CustomID string `json:"custom_id"`
-		Options  []struct {
-			Name  string          `json:"name"`
-			Value json.RawMessage `json:"value"`
-		} `json:"options"`
+		Name     string          `json:"name"`
+		CustomID string          `json:"custom_id"`
+		Options  []commandOption `json:"options"`
 	} `json:"data"`
 	User   *discordUser `json:"user"`
 	Member *struct {
-		User *discordUser `json:"user"`
+		User        *discordUser `json:"user"`
+		Permissions string       `json:"permissions"`
 	} `json:"member"`
 	// Context is 0 in a server, 1 in the bot's own DM, 2 in any other DM.
 	Context *int `json:"context"`
@@ -138,13 +138,46 @@ func (in interaction) ephemeral() bool {
 
 const ephemeralFlag = 64
 
-func (in interaction) optionRaw(name string) json.RawMessage {
+type commandOption struct {
+	Name    string          `json:"name"`
+	Type    int             `json:"type"`
+	Value   json.RawMessage `json:"value"`
+	Options []commandOption `json:"options"`
+}
+
+// sub returns the subcommand's name and options, for commands that have them.
+func (in interaction) sub() (string, []commandOption) {
 	for _, o := range in.Data.Options {
+		if o.Type == 1 { // subcommand
+			return o.Name, o.Options
+		}
+	}
+	return "", in.Data.Options
+}
+
+func (in interaction) optionRaw(name string) json.RawMessage {
+	_, opts := in.sub()
+	for _, o := range opts {
 		if o.Name == name {
 			return o.Value
 		}
 	}
 	return nil
+}
+
+// canManageGuild reports whether the caller may set up boards: Manage Server
+// or Administrator. Discord hides the command from everyone else, but the
+// check is here too.
+func (in interaction) canManageGuild() bool {
+	if in.Member == nil {
+		return false
+	}
+	perms, err := strconv.ParseUint(in.Member.Permissions, 10, 64)
+	if err != nil {
+		return false
+	}
+	const manageGuild, administrator = 1 << 5, 1 << 3
+	return perms&(manageGuild|administrator) != 0
 }
 
 func (in interaction) option(name string) string {
@@ -213,6 +246,10 @@ func (b *Bot) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Type == 3 {
 		b.handleButton(w, in, *user)
+		return
+	}
+	if in.Data.Name == "board" {
+		b.deferred(w, in, 5, func(ctx context.Context) botMessage { return b.cmdBoard(ctx, in) })
 		return
 	}
 	ctx := r.Context()
@@ -361,6 +398,29 @@ func reply(w http.ResponseWriter, in interaction, content string) {
 		data["flags"] = ephemeralFlag
 	}
 	writeJSON(w, map[string]any{"type": 4, "data": data})
+}
+
+// postMessage sends a message to a channel and returns its id.
+func (b *Bot) postMessage(ctx context.Context, channelID, content string) (string, error) {
+	var msg struct {
+		ID string `json:"id"`
+	}
+	err := b.call(ctx, http.MethodPost, "/channels/"+channelID+"/messages", map[string]any{
+		"content":          content,
+		"allowed_mentions": map[string]any{"parse": []string{}},
+	}, &msg)
+	return msg.ID, err
+}
+
+func (b *Bot) editMessage(ctx context.Context, channelID, messageID, content string) error {
+	return b.call(ctx, http.MethodPatch, "/channels/"+channelID+"/messages/"+messageID, map[string]any{
+		"content":          content,
+		"allowed_mentions": map[string]any{"parse": []string{}},
+	}, nil)
+}
+
+func (b *Bot) deleteMessage(ctx context.Context, channelID, messageID string) error {
+	return b.call(ctx, http.MethodDelete, "/channels/"+channelID+"/messages/"+messageID, nil, nil)
 }
 
 func (b *Bot) sendDM(ctx context.Context, discordID, content, components string) error {

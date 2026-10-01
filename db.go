@@ -64,6 +64,23 @@ CREATE TABLE IF NOT EXISTS notifications (
 	last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS notifications_pending ON notifications(next_at) WHERE sent_at IS NULL AND failed_at IS NULL;
+CREATE TABLE IF NOT EXISTS boards (
+	id               INTEGER PRIMARY KEY,
+	guild_id         TEXT NOT NULL,
+	channel_id       TEXT NOT NULL UNIQUE,
+	mode             TEXT NOT NULL CHECK (mode IN ('live','every')),
+	interval_minutes INTEGER NOT NULL DEFAULT 0,
+	delete_old       INTEGER NOT NULL DEFAULT 0,
+	mobile           INTEGER NOT NULL DEFAULT 0,
+	from_cur         TEXT NOT NULL DEFAULT '',
+	to_cur           TEXT NOT NULL DEFAULT '',
+	message_id       TEXT NOT NULL DEFAULT '',
+	signature        TEXT NOT NULL DEFAULT '',
+	posted_at        INTEGER NOT NULL DEFAULT 0,
+	failures         INTEGER NOT NULL DEFAULT 0,
+	last_error       TEXT NOT NULL DEFAULT '',
+	created_at       INTEGER NOT NULL
+);
 `
 
 // userError is a problem with the request that's safe to show the user.
@@ -443,6 +460,13 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (*Order, error) {
 		o.Fills = append(o.Fills, f)
 	}
 	return &o, rows.Err()
+}
+
+// OpenVolume is the total still unfilled across all open orders.
+func (s *Store) OpenVolume(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(remaining), 0) FROM orders WHERE status = 'open'`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) Cancel(ctx context.Context, orderID, userID int64) error {

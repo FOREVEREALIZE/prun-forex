@@ -44,13 +44,27 @@ The DMs the bot sends carry buttons for the next step (accept a CONT request, ma
 |---|---|
 | `/link company_code:ABCD` | Link your Discord account and company (DM only) |
 | `/unlink` | Stop the DMs (you'll need to `/link` again to trade) |
-| `/orders [from] [to] [private]` | Open orders on the board |
+| `/orders [from] [to] [mobile] [private]` | Open orders, as a coloured table (`mobile:True` gives a plain list for phones) |
 | `/post amount from to` | Post an order; asks first if it could fill existing orders, or if you already have one for that pair |
 | `/fill order [amount]` | Fill someone's order, fully or in part |
 | `/cancel order` | Cancel your own order |
 | `/myorders` | Your orders |
 | `/trades [fulfilled]` | Your trades to settle, with buttons |
 | `/trade id` | One trade with its buttons |
+| `/board setup channel mode …` | Keep an order board posted in a channel (server managers) |
+| `/board stop channel` · `/board list` | Stop one, or list this server's boards |
+
+### Order boards in a channel
+
+`/board setup` posts the board in a channel or thread and keeps it there. It needs Manage Server, and the bot has to be in the server (invite link above).
+
+- **`mode: when orders change`** — a fill is edited into the message where it is; a new order reposts the board and removes the old message, so it lands at the bottom of the channel.
+- **`mode: on a schedule`** — reposts every `every_minutes` minutes (5–1440, default 60), with `delete_old:True` to remove the previous board each time.
+- `from` / `to` limit it to one pair, and `mobile:True` posts the plain list instead of the table.
+
+Setting one up posts immediately, so a channel the bot can't write to fails there and then rather than quietly. A board that errors five times in a row is left alone.
+
+The bot's status reads **Watching 2.5m posted orders** — the total still unfilled across every open order. That needs a gateway connection, which the bot opens when `DISCORD_BOT_TOKEN` is set; it subscribes to no events and needs no privileged intents.
 
 ## JSON API
 

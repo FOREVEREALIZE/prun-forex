@@ -90,6 +90,11 @@ func main() {
 		log.Print("DISCORD_BOT_TOKEN not set: DMs will only be logged")
 	}
 	go bot.RunOutbox(ctx)
+	go bot.RunBoards(ctx)
+	if cfg.BotToken != "" {
+		// The gateway is only here to show "Watching ... posted orders".
+		go NewGateway(cfg.BotToken, store).Run(ctx)
+	}
 
 	srv, err := NewServer(cfg, store, bot)
 	if err != nil {

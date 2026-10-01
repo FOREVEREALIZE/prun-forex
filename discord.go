@@ -145,6 +145,28 @@ func (b *Bot) commands() []any {
 		return opt(4, "order", desc, true, map[string]any{"min_value": 1})
 	}
 
+	channel := opt(7, "channel", "Channel or thread to post the board in", true,
+		map[string]any{"channel_types": []int{0, 5, 10, 11, 12}}) // text, announcement, threads
+	// Boards live in a server, and only people who run it can set one up.
+	board := cmd("board", "Keep an order board posted in a channel (server managers)",
+		map[string]any{"type": 1, "name": "setup", "description": "Post and keep an order board in a channel", "options": []any{
+			channel,
+			opt(3, "mode", "When to update it", true, map[string]any{"choices": []any{
+				map[string]any{"name": "when orders change", "value": "live"},
+				map[string]any{"name": "on a schedule", "value": "every"},
+			}}),
+			opt(4, "every_minutes", "For a schedule: how often, in minutes (default 60)", false, map[string]any{"min_value": 5, "max_value": 1440}),
+			opt(5, "delete_old", "For a schedule: remove the previous board each time", false, nil),
+			opt(5, "mobile", "Plain list instead of the table, which phones wrap badly", false, nil),
+			currency("from", "Only orders offering this currency", false),
+			currency("to", "Only orders wanting this currency", false),
+		}},
+		map[string]any{"type": 1, "name": "stop", "description": "Stop updating the board in a channel", "options": []any{channel}},
+		map[string]any{"type": 1, "name": "list", "description": "Show this server's order boards"})
+	board["contexts"] = []int{0}               // servers only
+	board["integration_types"] = []int{0}      // installed on the server
+	board["default_member_permissions"] = "32" // Manage Server
+
 	// Linking ties a Discord account to a company, so it stays in the bot's DM.
 	link := cmd("link", "Link your Discord account and PrUn company so you can trade and get fill DMs",
 		opt(3, "company_code", "Your Prosperous Universe company code, e.g. NIKU", true,
@@ -157,7 +179,9 @@ func (b *Bot) commands() []any {
 		cmd("orders", "List open orders on the board",
 			currency("from", "Only orders offering this currency", false),
 			currency("to", "Only orders wanting this currency", false),
+			opt(5, "mobile", "Plain list instead of the table, which phones wrap badly", false, nil),
 			opt(5, "private", "Show the list only to you (default: everyone in the channel)", false, nil)),
+		board,
 		cmd("post", "Post an order to swap one currency for another, 1:1",
 			amount(true, "How much you're offering"),
 			currency("from", "What you have", true),
@@ -197,7 +221,7 @@ func (b *Bot) command(ctx context.Context, in interaction, du discordUser) botMe
 	}
 	switch in.Data.Name {
 	case "orders":
-		return b.cmdOrders(ctx, u, in.option("from"), in.option("to"))
+		return b.cmdOrders(ctx, u, in.option("from"), in.option("to"), in.optionBool("mobile"))
 	case "post":
 		return b.postPreview(ctx, u, in.option("from"), in.option("to"), in.optionInt("amount"), 0, true)
 	case "fill":
@@ -214,31 +238,19 @@ func (b *Bot) command(ctx context.Context, in interaction, du discordUser) botMe
 	return botMessage{Content: "Unknown command."}
 }
 
-func (b *Bot) cmdOrders(ctx context.Context, u *User, from, to string) botMessage {
+func (b *Bot) cmdOrders(ctx context.Context, u *User, from, to string, mobile bool) botMessage {
 	f := OrderFilter{Status: "open", From: NormalizeCurrency(from), To: NormalizeCurrency(to), Limit: 20}
 	orders, err := b.store.ListOrders(ctx, f)
 	if err != nil {
 		return oops(err)
 	}
-	pair := "on the board"
-	if f.From != "" || f.To != "" {
-		pair = fmt.Sprintf("for %s → %s", orDash(f.From), orDash(f.To))
+	msg := boardMessage(orders, f, mobile, "**Open orders**")
+	if len(orders) > 0 {
+		msg += "\nFill one with `/fill order:<number>`."
+	} else {
+		msg += " Post one with `/post`."
 	}
-	if len(orders) == 0 {
-		return botMessage{Content: fmt.Sprintf("No open orders %s. Post one with `/post`.", pair)}
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "**Open orders** %s:\n", pair)
-	for _, o := range orders {
-		mine := ""
-		if o.UserID == u.ID {
-			mine = " *(yours)*"
-		}
-		fmt.Fprintf(&sb, "`#%d` **%s → %s** — **%s** open — %s%s\n",
-			o.ID, o.From, o.To, formatInt(o.Remaining), o.Owner.Name(), mine)
-	}
-	sb.WriteString("\nFill one with `/fill order:<number>`.")
-	return botMessage{Content: sb.String()}
+	return botMessage{Content: msg}
 }
 
 func (b *Bot) cmdMyOrders(ctx context.Context, u *User) botMessage {

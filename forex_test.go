@@ -843,6 +843,7 @@ type discordHarness struct {
 	edits    []botReply
 	fnarBody string
 	lastAck  string // the immediate response Discord got
+	channel  *channelLog
 }
 
 // hidden reports whether the last reply was ephemeral (only the caller sees it).
@@ -879,6 +880,8 @@ func newDiscordHarness(t *testing.T, s *Store) *discordHarness {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/company/code/"):
 			w.Write([]byte(h.fnarBody))
+		case strings.HasPrefix(r.URL.Path, "/channels/") && h.channel != nil:
+			h.channel.serve(w, r)
 		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/messages/@original"):
 			var e botReply
 			json.NewDecoder(r.Body).Decode(&e)
@@ -971,8 +974,13 @@ func TestDiscordCommands(t *testing.T) {
 	}
 
 	// Listing shows it; bob can fill it.
-	if r := h.cmd(bob, "orders", ""); !strings.Contains(r.Content, "`#1` **AIC → NCC** — **100** open — ALICE | ALIC") {
+	if r := h.cmd(bob, "orders", ""); !strings.Contains(r.Content, "```ansi") ||
+		!strings.Contains(r.Content, "ALICE (ALIC)") || !strings.Contains(r.Content, "\x1b[0;32m100\x1b[0;0m / 100") {
 		t.Fatalf("orders: %q", r.Content)
+	}
+	if r := h.cmd(bob, "orders", `{"name":"mobile","type":5,"value":true}`); strings.Contains(r.Content, "```") ||
+		!strings.Contains(r.Content, "`#1` **AIC → NCC** — **100** open of 100 — ALICE | ALIC") {
+		t.Fatalf("orders mobile: %q", r.Content)
 	}
 	if r := h.cmd(bob, "orders", str("from", "CIS")); !strings.Contains(r.Content, "No open orders") {
 		t.Fatalf("filtered orders: %q", r.Content)
@@ -1092,20 +1100,23 @@ func TestDiscordWorksOutsideBotDM(t *testing.T) {
 	// Every command is offered in servers and other DMs, not just the bot's.
 	for _, c := range h.bot.commands() {
 		cmd := c.(map[string]any)
-		want := "[0 1 2]"
-		if cmd["name"] == "link" {
-			want = "[1]" // linking stays in the bot's DM
+		contexts, installs := "[0 1 2]", "[0 1]"
+		switch cmd["name"] {
+		case "link":
+			contexts = "[1]" // linking stays in the bot's DM
+		case "board":
+			contexts, installs = "[0]", "[0]" // boards belong to a server
 		}
-		if got := cmd["contexts"]; fmt.Sprint(got) != want {
-			t.Errorf("/%s contexts = %v, want %s", cmd["name"], got, want)
+		if got := cmd["contexts"]; fmt.Sprint(got) != contexts {
+			t.Errorf("/%s contexts = %v, want %s", cmd["name"], got, contexts)
 		}
-		if got := cmd["integration_types"]; fmt.Sprint(got) != "[0 1]" {
+		if got := cmd["integration_types"]; fmt.Sprint(got) != installs {
 			t.Errorf("/%s integration_types = %v", cmd["name"], got)
 		}
 	}
 
 	// The board is public, like it is on the site.
-	if r := h.cmdIn(alice, 0, "orders", ""); h.hidden() || !strings.Contains(r.Content, "`#1`") {
+	if r := h.cmdIn(alice, 0, "orders", ""); h.hidden() || !strings.Contains(r.Content, "#1") {
 		t.Fatalf("orders in a server should be visible: hidden=%v %q", h.hidden(), r.Content)
 	}
 	if h.cmdIn(alice, 0, "orders", `{"name":"private","type":5,"value":true}`); !h.hidden() {
@@ -1144,6 +1155,244 @@ func TestDiscordWorksOutsideBotDM(t *testing.T) {
 		`"member":{"user":{"id":"` + alice.DiscordID + `","username":"alice"}}}`
 	if r := h.send(alice, body); !strings.Contains(r.Content, "Your orders:") {
 		t.Fatalf("member command: %q", r.Content)
+	}
+}
+
+// channelLog stands in for a Discord channel, recording what the bot does to it.
+type channelLog struct {
+	mu      sync.Mutex
+	actions []string // "post", "edit" or "delete", in order
+	posts   []string // contents of posts and edits, newest last
+	nextID  int
+	fail    bool // refuse everything, like a channel the bot can't write to
+}
+
+func (c *channelLog) serve(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fail {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"code":50013,"message":"Missing Permissions"}`))
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	switch {
+	case r.Method == http.MethodDelete:
+		c.actions = append(c.actions, "delete")
+	case r.Method == http.MethodPatch:
+		c.actions = append(c.actions, "edit")
+		c.posts = append(c.posts, body.Content)
+	default:
+		c.nextID++
+		c.actions = append(c.actions, "post")
+		c.posts = append(c.posts, body.Content)
+	}
+	fmt.Fprintf(w, `{"id":"m%d"}`, c.nextID)
+}
+
+func (c *channelLog) actionList() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.actions, ",")
+}
+
+func (c *channelLog) last() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.posts) == 0 {
+		return ""
+	}
+	return c.posts[len(c.posts)-1]
+}
+
+func (c *channelLog) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.actions, c.posts = nil, nil
+}
+
+func (h *discordHarness) withChannel(c *channelLog) { h.channel = c }
+
+func TestDiscordBoard(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	ch := &channelLog{}
+	h := newDiscordHarness(t, s)
+	h.withChannel(ch)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+
+	setup := func(opts string) botReply {
+		t.Helper()
+		return h.send(alice, `{"type":2,"token":"tok","application_id":"app","context":0,"guild_id":"g1",`+
+			`"data":{"name":"board","options":[{"name":"setup","type":1,"options":[`+opts+`]}]},`+
+			`"member":{"permissions":"32","user":{"id":"`+alice.DiscordID+`","username":"alice"}}}`)
+	}
+	channelOpt := `{"name":"channel","type":7,"value":"c1"}`
+
+	// Someone without Manage Server is turned away.
+	noPerms := h.send(alice, `{"type":2,"token":"tok","application_id":"app","context":0,"guild_id":"g1",`+
+		`"data":{"name":"board","options":[{"name":"list","type":1,"options":[]}]},`+
+		`"member":{"permissions":"0","user":{"id":"`+alice.DiscordID+`","username":"alice"}}}`)
+	if !strings.Contains(noPerms.Content, "Manage Server") {
+		t.Fatalf("without permission: %q", noPerms.Content)
+	}
+
+	// Setting up posts the board straight away.
+	if r := setup(channelOpt + `,{"name":"mode","type":3,"value":"live"}`); !strings.Contains(r.Content, "when orders change") {
+		t.Fatalf("setup: %q", r.Content)
+	}
+	if got := ch.actionList(); got != "post" {
+		t.Fatalf("setup should post once, did %q", got)
+	}
+	if posted := ch.last(); !strings.Contains(posted, "```ansi") || !strings.Contains(posted, "ALICE (ALIC)") {
+		t.Fatalf("board content: %q", posted)
+	}
+
+	boards, _ := s.Boards(ctx, "g1")
+	if len(boards) != 1 {
+		t.Fatalf("expected one board, got %+v", boards)
+	}
+	refresh := func() {
+		t.Helper()
+		boards, _ := s.Boards(ctx, "g1")
+		for _, b := range boards {
+			if err := h.bot.refreshBoard(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Nothing changed: the board is left alone.
+	ch.reset()
+	refresh()
+	if got := ch.actionList(); got != "" {
+		t.Fatalf("unchanged board shouldn't be touched, did %q", got)
+	}
+
+	// A fill is edited into the message where it is.
+	s.Fill(ctx, 1, bob, 40)
+	refresh()
+	if got := ch.actionList(); got != "edit" {
+		t.Fatalf("a fill should be edited in, did %q", got)
+	}
+	if !strings.Contains(ch.last(), "60") {
+		t.Fatalf("edited board should show 60 open: %q", ch.last())
+	}
+
+	// A new order reposts, so it lands at the bottom of the channel.
+	ch.reset()
+	mustPlace(t, s, bob, "CIS", "ICA", 7, false)
+	refresh()
+	if got := ch.actionList(); got != "post,delete" {
+		t.Fatalf("a new order should repost and remove the old, did %q", got)
+	}
+
+	// A schedule posts on its own interval, and can replace the old board.
+	ch.reset()
+	if r := setup(channelOpt + `,{"name":"mode","type":3,"value":"every"},{"name":"every_minutes","type":4,"value":5},{"name":"delete_old","type":5,"value":true}`); !strings.Contains(r.Content, "every 5 min, replacing the old one") {
+		t.Fatalf("schedule setup: %q", r.Content)
+	}
+	ch.reset()
+	refresh()
+	if got := ch.actionList(); got != "" {
+		t.Fatalf("a schedule shouldn't post again straight away, did %q", got)
+	}
+	s.db.Exec(`UPDATE boards SET posted_at = posted_at - 600`)
+	refresh()
+	if got := ch.actionList(); got != "post,delete" {
+		t.Fatalf("a due schedule should repost and delete the old, did %q", got)
+	}
+	if !strings.Contains(ch.last(), "<t:") {
+		t.Fatalf("a scheduled board should carry a timestamp: %q", ch.last())
+	}
+
+	// Listing and stopping.
+	list := h.send(alice, `{"type":2,"token":"tok","application_id":"app","context":0,"guild_id":"g1",`+
+		`"data":{"name":"board","options":[{"name":"list","type":1,"options":[]}]},`+
+		`"member":{"permissions":"8","user":{"id":"`+alice.DiscordID+`","username":"alice"}}}`)
+	if !strings.Contains(list.Content, "<#c1> — every 5 min") {
+		t.Fatalf("list: %q", list.Content)
+	}
+	stop := h.send(alice, `{"type":2,"token":"tok","application_id":"app","context":0,"guild_id":"g1",`+
+		`"data":{"name":"board","options":[{"name":"stop","type":1,"options":[`+channelOpt+`]}]},`+
+		`"member":{"permissions":"32","user":{"id":"`+alice.DiscordID+`","username":"alice"}}}`)
+	if !strings.Contains(stop.Content, "Stopped") {
+		t.Fatalf("stop: %q", stop.Content)
+	}
+	if boards, _ := s.Boards(ctx, "g1"); len(boards) != 0 {
+		t.Fatalf("board should be gone: %+v", boards)
+	}
+
+	// A channel the bot can't post in fails at setup, rather than silently.
+	ch.fail = true
+	if r := setup(channelOpt + `,{"name":"mode","type":3,"value":"live"}`); !strings.Contains(r.Content, "couldn't post") {
+		t.Fatalf("unpostable channel: %q", r.Content)
+	}
+	if boards, _ := s.Boards(ctx, "g1"); len(boards) != 0 {
+		t.Fatalf("a board that can't post shouldn't be kept: %+v", boards)
+	}
+}
+
+func TestBoardTableAndStatus(t *testing.T) {
+	// The table pads by visible width, ignoring the colour codes.
+	orders := []Order{{
+		ID: 3, From: "AIC", To: "CIS", Amount: 1_000_000, Remaining: 1_000_000,
+		Owner:     Trader{Handle: "evil", CompanyUser: "Dr.Evil_", CompanyCode: "ORGS", CorpCode: "B"},
+		CreatedAt: time.Now().Add(-11 * 24 * time.Hour),
+	}, {
+		ID: 14, From: "ICA", To: "CIS", Amount: 500_000, Remaining: 500_000,
+		Owner:     Trader{Handle: "v", CompanyUser: "Vence62", CompanyCode: "LNS"},
+		CreatedAt: time.Now().Add(-7 * 24 * time.Hour),
+	}}
+	msg := boardMessage(orders, OrderFilter{}, false, "")
+	lines := strings.Split(strings.Trim(strings.TrimPrefix(msg, "```ansi\n"), "`\n"), "\n")
+	width := visWidth(lines[0])
+	for i, l := range lines {
+		if visWidth(l) != width {
+			t.Errorf("line %d is %d wide, want %d: %q", i, visWidth(l), width, l)
+		}
+	}
+	for _, want := range []string{"[B] Dr.Evil_ (ORGS)", "Vence62 (LNS)", "11d", "7d",
+		ansiOrderID + "#3" + ansiReset, currencyColor["AIC"] + "AIC" + ansiReset, ansiAmount + "500,000" + ansiReset} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("board is missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "│   500,000 / 500,000 │") {
+		t.Error("the amount column should be centred")
+	}
+
+	for _, c := range []struct {
+		n    int64
+		want string
+	}{{0, "0 posted orders"}, {950, "950 posted orders"}, {12_500, "12.5k posted orders"},
+		{2_500_000, "2.5m posted orders"}, {3_000_000, "3m posted orders"}, {1_250_000_000, "1.2b posted orders"}, {1_960_000_000, "2b posted orders"}} {
+		if got := statusText(c.n); got != c.want {
+			t.Errorf("statusText(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+func TestOpenVolume(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, bob := newUser(t, s, "alice"), newUser(t, s, "bob")
+	if v, _ := s.OpenVolume(ctx); v != 0 {
+		t.Fatalf("empty board: %d", v)
+	}
+	mustPlace(t, s, alice, "AIC", "NCC", 100, false)
+	mustPlace(t, s, bob, "CIS", "ICA", 50, false)
+	s.Fill(ctx, 1, bob, 30)
+	if v, _ := s.OpenVolume(ctx); v != 120 {
+		t.Fatalf("after a fill: %d, want 120", v)
+	}
+	s.Cancel(ctx, 2, bob.ID)
+	if v, _ := s.OpenVolume(ctx); v != 70 {
+		t.Fatalf("after a cancel: %d, want 70", v)
 	}
 }
 
