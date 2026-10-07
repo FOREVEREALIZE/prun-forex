@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -131,12 +133,28 @@ const discordMessageLimit = 1800
 // plain list). Rows are dropped from the end until it fits in a Discord
 // message, since the colour codes count towards the limit.
 func boardMessage(orders []Order, filter OrderFilter, mobile bool, heading string) string {
+	orders = sortedForBoard(orders)
 	for rows := len(orders); ; rows-- {
 		msg := renderBoard(orders[:rows], len(orders)-rows, filter, mobile, heading)
 		if rows == 0 || len(msg) <= discordMessageLimit {
 			return msg
 		}
 	}
+}
+
+// sortedForBoard groups the board by pair — origin currency, then target —
+// with the oldest order of each pair first, which is also the order fills
+// match in. The caller's slice is left alone.
+func sortedForBoard(orders []Order) []Order {
+	out := slices.Clone(orders)
+	slices.SortStableFunc(out, func(a, b Order) int {
+		return cmp.Or(
+			strings.Compare(a.From, b.From),
+			strings.Compare(a.To, b.To),
+			a.CreatedAt.Compare(b.CreatedAt),
+			cmp.Compare(a.ID, b.ID))
+	})
+	return out
 }
 
 func renderBoard(orders []Order, more int, filter OrderFilter, mobile bool, heading string) string {

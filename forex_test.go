@@ -1377,6 +1377,37 @@ func TestBoardTableAndStatus(t *testing.T) {
 	}
 }
 
+func TestBoardSorting(t *testing.T) {
+	now := time.Now()
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	orders := []Order{
+		{ID: 1, From: "NCC", To: "AIC", CreatedAt: at(1), Amount: 1, Remaining: 1},
+		{ID: 2, From: "AIC", To: "NCC", CreatedAt: at(2), Amount: 1, Remaining: 1},
+		{ID: 3, From: "AIC", To: "CIS", CreatedAt: at(3), Amount: 1, Remaining: 1},
+		{ID: 4, From: "AIC", To: "NCC", CreatedAt: at(9), Amount: 1, Remaining: 1}, // older than #2
+		{ID: 5, From: "CIS", To: "AIC", CreatedAt: at(4), Amount: 1, Remaining: 1},
+	}
+	var got []int64
+	for _, o := range sortedForBoard(orders) {
+		got = append(got, o.ID)
+	}
+	// AIC→CIS, then AIC→NCC oldest first, then CIS→AIC, then NCC→AIC.
+	if fmt.Sprint(got) != "[3 4 2 5 1]" {
+		t.Fatalf("sorted order = %v, want [3 4 2 5 1]", got)
+	}
+	if orders[0].ID != 1 {
+		t.Fatal("sorting should leave the caller's slice alone")
+	}
+	// The rendered table follows the same order.
+	msg := boardMessage(orders, OrderFilter{}, true, "")
+	for i, want := range []string{"`#3`", "`#4`", "`#2`", "`#5`", "`#1`"} {
+		line := strings.Split(strings.TrimSpace(msg), "\n")[i]
+		if !strings.HasPrefix(line, want) {
+			t.Errorf("line %d is %q, want it to start with %s", i, line, want)
+		}
+	}
+}
+
 func TestOpenVolume(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
